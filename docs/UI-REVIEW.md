@@ -221,6 +221,7 @@ Impact is a judgment; the other numbers are measurements.
 | P10 | Virtualized lanes | 3 | L | 0.75 |
 
 ### P1 — `content-visibility` on cards
+- Estado: implementado en c9db144. Measured (`--measure`, serialized page, median of 5 loads): full relayout of the 80-card lane 21.7 → 9.4 ms in columns (content-visibility forced off in the same build: 22.5 ms), 8.2 → 3.3 ms in list. `contain-intrinsic-size` is the content box, so the estimate is 84 px outer (66 + 18 chrome) comfortable and 56 px (42 + 14) compact. Lane 1 scroll height 7,455 px as rendered vs 7,674 px with every card laid out (−2.9%); compact 4,814 vs 4,838 px. `scrollIntoView` on a skipped card is not covered by jsdom.
 - Síntoma: every card of every lane is laid out and styled although at most 6 of 80 are on screen (medición: full relayout 21.7 ms vs 1.8 ms for the 6-card board; 12.5 screens in lane 1).
 - Propuesta: set `contentVisibility: 'auto'` and `containIntrinsicSize: 'auto 84px'` in the existing inline style of `CardRow` (and the same in list mode). CSS only: no new dependency, no markup change, the DOM and the keyboard model stay as they are.
 - Mejora esperada: measured on the serialized heavy page: full relayout 22.0 → 9.1 ms (−59%) in columns and 8.7 → 3.5 ms (−60%) in list; style recalculation 12.1 → 9.0 ms (−25%). Adding the same rule on lanes changes nothing (9.3 ms). It does **not** reduce nodes (2,229) or React work.
@@ -229,6 +230,7 @@ Impact is a judgment; the other numbers are measurements.
 - Evidencia: `heavy-columns.png`, `heavy-list.png`; `--measure` section "content-visibility experiment" (CSS injected into the serialized page; React not involved).
 
 ### P2 — Render isolation
+- Estado: implementado en c9db144. Measured with 207 cards: `CardRow` renders per unchanged poll 414 → 0; per poll with one card changed 414 → 1; per selection move 207 → 2; per checklist toggle 621 → 1; `ItemRow` per toggle 180 → 1; `Markdown` per toggle 39 → 0; `Workspace` + `BoardBody` renders per poll 4 → 0. Cost: +42 DOM nodes (the lane strip) and jsdom mount 300 → 332 ms (dev React, ±10%).
 - Síntoma: a poll, a selection or a checkbox toggle re-renders every card (medición: 414 `CardRow` renders per poll of 207 cards, 207 per `j` press, 621 and 180 `ItemRow` renders per checkbox toggle).
 - Propuesta: wrap `CardRow` and `ItemRow` in `React.memo`; pass `CardRow` the pieces it needs (`card`, `labels`, `members`, `lists` only for the menu) instead of the whole `view`; replace the per-card subscription to the selected-card store with one boolean selector per card (`useStore(selected)` compared to `card.id` inside a selector, or a derived `isSelected` atom); read `viewQ.isFetching` in `Header` instead of `Workspace`, so a fetch start does not re-render the board; memoize `Markdown` by text.
 - Mejora esperada: with unchanged data, `CardRow` renders per poll 414 → 0; per `j` press 207 → 2; per toggle 621 → ≈3 (only the card whose counter changes); `Markdown` parses per toggle 39 → 0. Render time per event should fall toward the 6-card board's floor (1.5–4 ms in the same harness). Estimate, not measured after a change.
@@ -245,6 +247,7 @@ Impact is a judgment; the other numbers are measurements.
 - Evidencia: `--measure` drawer table (comments 3,411 / 2,184 px); `heavy-drawer-checklists.png` shows the drawer's density up to the comment section's start.
 
 ### P4 — Lane strip and lane-jump keys
+- Estado: implementado en c9db144. Measured: strip 42.5 px in columns mode (5.9% of 720), 10 chips matching the 10 lanes; presses to the last lane 168 (`j`) → 9 (`l` from a card in lane 1; 10 from nothing selected). The `IntersectionObserver` highlight and the lane scroll are tested with a stubbed observer and stubbed rects (jsdom has no layout).
 - Síntoma: with 10 lanes only 4 are visible at 1,280 px, the rest hide behind a scroll with no overview; reaching the last lane by keyboard takes 168 presses (medición: board 3,114 / 1,280 px; `j` presses 81 to Triage, 168 to Done).
 - Propuesta: in columns mode, show the same lane chips the list mode already has (name + count, one row, ~42 px) above the board; clicking a chip scrolls that lane into view and a lane that is on screen is highlighted. Add `h` / `l` (previous / next lane: scroll into view and select the lane's first card); `j`/`k` keep their meaning. The chip component is already in `ListFocus`; it gets shared.
 - Mejora esperada: lanes reachable without touching the horizontal scroll 4 → 10 (the 10 chips measure 1,149 px, they fit 1,280); presses to reach any lane 168 → 1 click or ≤9 key presses; cost 42 px of vertical space (6% of a 720 px pane). With "decenas" of lanes the strip itself scrolls, as it already does in list mode: the improvement then is the click-to-jump and the counts, not that all fit.
@@ -253,6 +256,7 @@ Impact is a judgment; the other numbers are measurements.
 - Evidencia: `heavy-columns.png` (4 lanes and a cut fifth), `heavy-list.png` (chip bar cut at the fifth chip); `--measure` "Keyboard" and layout tables.
 
 ### P5 — Density: comfortable / compact
+- Estado: implementado en c9db144. Measured (real Chromium, every card laid out): median card height comfortable 83.5 px, compact 56 px; cards fully visible in the 80-card lane at 1,280×720: 6 → 9 compact (comfortable 6 → 5 because the new 42.5 px strip takes its room); lane 1 scroll height 7,674 → 4,838 px compact; selecting a card moves the next one 30 → 0 px (the actions are an absolutely positioned overlay in both densities).
 - Síntoma: a card is 83.5 px at the median and only 34% of it is title; 6 of 80 cards fit on screen (medición: 5 markers per card, label rows 14% of the height, selected card +30 px).
 - Propuesta: a `density` setting (`comfortable` = today, `compact`), a segmented control in the settings popover, persisted with the other settings, English and Spanish strings. Compact: title on one line (clamp 1), labels as colour bars without text (the unnamed-label bar already exists; the name goes in `title`), due/checklist/comments/attachments inline on the same row as the avatars (max 3 + `+N`), 6 px padding. The card actions row becomes an overlay on hover/selection that takes no height, so selecting no longer shifts the list in either density.
 - Mejora esperada: median card ~83.5 → ~56 px (estimate: title 1 line + one meta row + padding, from the measured parts). Cards fully visible in lane 1: 6 → ~9; lane 1 height 12.5 → ~8–9 screens; no layout shift on selection (113.5 → 83.5 px). A later extension, "auto" (compact only for lanes above N cards, 25 by default), would give the 80-card lane density while the 6-card lanes keep their comfortable look; that is a third value of the same setting, not a different feature.
@@ -285,6 +289,7 @@ Impact is a judgment; the other numbers are measurements.
 - Evidencia: `heavy-drawer-checklists.png`; `--measure` drawer table (checklists 2,239 px, 518 nodes, 60 items, 200 buttons).
 
 ### P9 — Label and avatar overflow (`+N`)
+- Estado: implementado en c9db144. Measured: avatars hidden without a `+N` 28 → 0; label rows wrapped to two lines 9 → 0; truncated label chips without a `title` 43 → 0; meta rows overflowing a card 0 → 0 (both densities).
 - Síntoma: information is lost silently on the card (medición: 28 avatars hidden across 20 cards, 43 label chips truncated, 9 label rows wrapped to a second line).
 - Propuesta: avatars: show 3 and a `+N` chip with the remaining names in its `title`; labels: show up to 3 chips (max width 5 rem so three fit a 300 px lane on one line) and a `+N` chip with the rest in the `title`; give every truncated chip a `title`.
 - Mejora esperada: hidden avatars 28 → 0 (counted instead of dropped); wrapped label rows 9 → 0; card height variance shrinks (range 59.5–123 px today). Truncated chips will go **up** with a narrower chip: the `title` and the drawer carry the full name.
