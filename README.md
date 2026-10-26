@@ -117,6 +117,12 @@ Both are required and must come from the same Power-Up — a token presented wit
 different app's key is rejected by Trello. The pair can also be provided through
 `TRELLO_API_KEY` / `TRELLO_TOKEN` in the environment instead of the form.
 
+**One account, or one per profile?** By default the connection belongs to the whole
+app: connect once and every Hermes profile uses it. Switch **Settings →
+Credentials** to *This profile* before connecting if you want this profile to use a
+different Trello account — each scope keeps its own file, the profile one wins when
+both exist, and the pane always shows which one is in use.
+
 ## Privacy and what leaves your machine
 
 Short version: credentials never reach the UI, traffic goes to `api.trello.com`

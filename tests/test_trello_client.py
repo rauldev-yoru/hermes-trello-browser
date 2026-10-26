@@ -1,8 +1,10 @@
 """Tests for dashboard/trello_api_client.py. No network: a fake transport answers."""
 
+import atexit
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -12,6 +14,17 @@ import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# --- suite sandbox -------------------------------------------------------------
+# No test may read or write the real Hermes home, or pick up the real Trello pair
+# from the environment. Every other test module imports this one, so the redirect
+# happens before any client code resolves a home.
+_SANDBOX = tempfile.mkdtemp(prefix="trello-browser-tests-")
+os.environ["HOME"] = _SANDBOX
+os.environ["HERMES_HOME"] = os.path.join(_SANDBOX, ".hermes")
+for _leaky in ("TRELLO_API_KEY", "TRELLO_TOKEN"):
+    os.environ.pop(_leaky, None)
+atexit.register(shutil.rmtree, _SANDBOX, ignore_errors=True)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1098,6 +1111,25 @@ class SharedClientTests(unittest.TestCase):
         self.assertEqual(source, "env")
         third, _ = C.shared_client({**env, "TRELLO_TOKEN": "cccccccc"})
         self.assertIsNot(first, third)
+
+
+class SuiteSandboxTests(unittest.TestCase):
+    """The guard above is load-bearing: keep it honest."""
+
+    def test_the_suite_never_sees_the_real_home_or_pair(self):
+        home = Path(os.environ["HOME"]).resolve()
+        hermes_home = Path(os.environ["HERMES_HOME"]).resolve()
+        # the redirect is a throwaway directory, not the real account's home
+        self.assertTrue(home.is_dir(), home)
+        self.assertNotEqual(home, Path.home().anchor)  # never '/'
+        self.assertNotIn("trello-browser", str(home.parent.parent), "looks like a real profile home")
+        self.assertEqual(hermes_home.parent, home)
+        self.assertNotIn("TRELLO_API_KEY", os.environ)
+        self.assertNotIn("TRELLO_TOKEN", os.environ)
+        # nothing to resolve: an empty environ can never reach the real pair
+        creds, source = C.resolve_credentials({})
+        self.assertIsNone(creds)
+        self.assertIsNone(source)
 
 
 if __name__ == "__main__":

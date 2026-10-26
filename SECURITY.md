@@ -8,10 +8,15 @@ agent read and update the same cards. Everything below is what it actually does.
 - The plugin needs a Trello **API key** and **token** (Power-Up admin → *Trello
   Auth* → generate a key → *Token*). Both belong to your own Trello account.
 - They are read, in this order, from:
-  1. the environment (`TRELLO_API_KEY`, `TRELLO_TOKEN`),
-  2. `$HERMES_HOME/trello-browser/credentials.json` (directory `0700`, file `0600`),
-  3. `~/.hermes/trello-browser/credentials.json` — the root-home fallback, so a
-     named profile inherits what the pane configured.
+  1. the environment (`TRELLO_API_KEY`, `TRELLO_TOKEN`) — takes precedence over
+     everything, and the pane says so instead of pretending to own the connection,
+  2. `<profile home>/trello-browser/credentials.json` — a per-profile account,
+  3. `<agent home>/trello-browser/credentials.json` (directory `0700`, file `0600`)
+     — the app-wide account every profile inherits.
+- The pane's **Settings → Credentials** choose where a new connection is stored:
+  **All profiles** (default) writes the app-wide file, **This profile** writes the
+  active profile's file. Changing that choice never moves or copies credentials
+  that already exist; the status line always names the scope in use.
 - The file is written only when you submit the connect form in the pane. The
   plugin never writes credentials to `config.yaml`, logs, error messages or URLs.
 - The desktop UI never receives the key or the token: every Trello call is made by
