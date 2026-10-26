@@ -6,7 +6,7 @@ only the standard library.
 
 Responsibilities
 ----------------
-* credential resolution and storage (env, ``$HERMES_HOME`` file, root fallback)
+* credential resolution and storage (env, this profile's file, the app-wide file)
 * a fixed allowlist of Trello endpoints (no caller-supplied URLs)
 * id and input validation before anything touches the network
 * a response cache with single-flight, a sliding-window rate limiter and 429
@@ -142,19 +142,81 @@ def validate_credential_values(api_key, token):
             raise ValueError(f"{label} must be 8-256 printable characters with no spaces")
 
 
-def hermes_home(environ=None):
-    environ = os.environ if environ is None else environ
-    raw = environ.get("HERMES_HOME")
-    return Path(raw).expanduser() if raw else Path.home() / ".hermes"
+_CRED_DIR = "trello-browser"
+_CRED_FILE = "credentials.json"
+SCOPES = ("app", "profile")
 
 
-def credentials_file(environ=None):
-    """Primary credential file inside the active ``$HERMES_HOME``."""
-    return hermes_home(environ) / "trello-browser" / "credentials.json"
+def _default_home():
+    return Path.home() / ".hermes"
 
 
-def _fallback_credentials_file():
-    return Path.home() / ".hermes" / "trello-browser" / "credentials.json"
+def _capture_root_home():
+    """The app-wide home, read once at import: the root of the Hermes home tree.
+
+    That is the process home (``$HERMES_HOME`` or ``~/.hermes``) when it already is a root. When this
+    process runs inside a named profile (``<root>/profiles/<name>``) Hermes can say where the root is, so
+    "all profiles" stays the same place for the dashboard and for every profile's agent half. The Hermes
+    import is optional and kept out of module scope.
+    """
+    raw = (os.environ.get("HERMES_HOME") or "").strip()
+    base = Path(raw).expanduser() if raw else _default_home()
+    try:
+        from hermes_constants import get_default_hermes_root  # optional: absent outside Hermes
+    except ImportError:
+        return base
+    try:
+        return Path(get_default_hermes_root())
+    except Exception:  # noqa: BLE001 - a Hermes-side failure must not break the client
+        return base
+
+
+ROOT_HOME = _capture_root_home()
+
+
+def effective_home(environ=None):
+    """Home of the request being served: Hermes' context override, then ``HERMES_HOME``, then the default.
+
+    With an explicit ``environ`` mapping (tests, embedding) only that mapping is consulted.
+    """
+    if environ is not None:
+        raw = (environ.get("HERMES_HOME") or "").strip()
+        return Path(raw).expanduser() if raw else _default_home()
+    try:
+        from hermes_constants import get_hermes_home  # optional: absent outside Hermes
+    except ImportError:
+        get_hermes_home = None
+    if get_hermes_home is not None:
+        try:
+            return Path(get_hermes_home())
+        except Exception:  # noqa: BLE001 - fall back to the environment below
+            pass
+    raw = (os.environ.get("HERMES_HOME") or "").strip()
+    return Path(raw).expanduser() if raw else _default_home()
+
+
+def _same_dir(a, b):
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return Path(a) == Path(b)
+
+
+def _cred_path(home):
+    return Path(home) / _CRED_DIR / _CRED_FILE
+
+
+def _profile_is_root(environ=None):
+    return _same_dir(effective_home(environ), ROOT_HOME)
+
+
+def credentials_path(scope, environ=None):
+    """File for ``scope``. Without a separate profile home, ``"profile"`` is the app-wide file."""
+    if scope not in SCOPES:
+        raise ValueError('scope must be "app" or "profile"')
+    if scope == "profile" and not _profile_is_root(environ):
+        return _cred_path(effective_home(environ))
+    return _cred_path(ROOT_HOME)
 
 
 def _read_credentials_file(path):
@@ -170,42 +232,65 @@ def _read_credentials_file(path):
     return None
 
 
-def resolve_credentials(environ=None):
-    """Return ``(Credentials | None, source)`` with source ``env``/``file``/``None``.
+def _explicit(environ):
+    """``environ`` when the caller injected a mapping; None means "the live process"."""
+    return None if environ is None or environ is os.environ else environ
 
-    Evaluated on every call so a settings change is live.
+
+def resolve_credentials(environ=None):
+    """Return ``(Credentials | None, source)``, source one of ``env``/``profile``/``app``/``None``.
+
+    Order: environment variables, this profile's file, the app-wide file. Evaluated on every call so a
+    settings change (or a switch of profile) is live.
     """
-    environ = os.environ if environ is None else environ
-    key = (environ.get("TRELLO_API_KEY") or "").strip()
-    token = (environ.get("TRELLO_TOKEN") or "").strip()
+    env = os.environ if environ is None else environ
+    key = (env.get("TRELLO_API_KEY") or "").strip()
+    token = (env.get("TRELLO_TOKEN") or "").strip()
     if key and token:
         return Credentials(key, token), "env"
-    for path in (credentials_file(environ), _fallback_credentials_file()):
-        creds = _read_credentials_file(path)
+    explicit = _explicit(environ)
+    if not _profile_is_root(explicit):
+        creds = _read_credentials_file(credentials_path("profile", explicit))
         if creds is not None:
-            return creds, "file"
+            return creds, "profile"
+    creds = _read_credentials_file(credentials_path("app", explicit))
+    if creds is not None:
+        return creds, "app"
     return None, None
 
 
 def credentials_status(environ=None):
     """Connection state only. Never contains the key or the token."""
-    environ = os.environ if environ is None else environ
-    creds, source = resolve_credentials(environ)
-    key_set = bool((environ.get("TRELLO_API_KEY") or "").strip())
-    token_set = bool((environ.get("TRELLO_TOKEN") or "").strip())
-    env_partial = key_set != token_set  # only one of the two env vars is set
+    env = os.environ if environ is None else environ
+    explicit = _explicit(environ)
+    _creds, source = resolve_credentials(environ)
+    key_set = bool((env.get("TRELLO_API_KEY") or "").strip())
+    token_set = bool((env.get("TRELLO_TOKEN") or "").strip())
+    profile_is_root = _profile_is_root(explicit)
+    profile_file = (not profile_is_root) and _read_credentials_file(credentials_path("profile", explicit)) is not None
     return {
-        "configured": creds is not None,
+        "configured": source is not None,
         "source": source,
-        "env_partial": env_partial,
-        "file_present": credentials_file(environ).is_file(),
+        "active_scope": source,
+        "env_partial": key_set != token_set,  # only one of the two env vars is set
+        "app_file": _read_credentials_file(credentials_path("app", explicit)) is not None,
+        "profile_file": profile_file,
+        "profile_overrides": source == "profile",
+        "profile_is_root": profile_is_root,
+        "profile_home": str(effective_home(explicit)),
     }
 
 
-def save_credentials(api_key, token, environ=None):
-    """Write the credential file (dir 0700, file 0600) atomically. Returns its path."""
+def save_credentials(api_key, token, scope="app", environ=None):
+    """Write the credential file for ``scope`` (dir 0700, file 0600) atomically.
+
+    Returns ``{"path", "scope", "requested_scope"}``. ``scope`` is where the file really went: asking for
+    ``"profile"`` while the process has no home of its own (profile home == app home) stores the app-wide
+    file and says so.
+    """
     validate_credential_values(api_key, token)
-    path = credentials_file(environ)
+    path = credentials_path(scope, _explicit(environ))
+    stored = "app" if _same_dir(path.parent.parent, ROOT_HOME) else "profile"
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
     try:
@@ -229,12 +314,12 @@ def save_credentials(api_key, token, environ=None):
                 tmp.unlink()
             except OSError:
                 pass
-    return path
+    return {"path": path, "scope": stored, "requested_scope": scope}
 
 
-def delete_credentials(environ=None):
-    """Remove the credential file in the active ``$HERMES_HOME``. True if it existed."""
-    path = credentials_file(environ)
+def delete_credentials(scope="app", environ=None):
+    """Remove the credential file for ``scope``. True if it existed."""
+    path = credentials_path(scope, _explicit(environ))
     try:
         path.unlink()
         return True
@@ -1139,7 +1224,8 @@ class TrelloClient:
 
 _transport_override = None
 _shared_lock = threading.Lock()
-_shared = {"client": None, "fingerprint": None}  # type: dict
+_SHARED_MAX = 8
+_shared = {}  # type: dict  # (credentials, transport) -> TrelloClient, oldest first
 
 
 def set_transport_override(transport):
@@ -1147,22 +1233,25 @@ def set_transport_override(transport):
     global _transport_override
     with _shared_lock:
         _transport_override = transport
-        _shared["client"] = None
-        _shared["fingerprint"] = None
+        _shared.clear()
 
 
 def shared_client(environ=None):
     """Client for the currently resolved credentials; raises ``TrelloNotConnected``.
 
-    Credentials are re-resolved on every call. The client (and so its cache and
-    rate limiter) is reused while the credential pair is unchanged.
+    Credentials are re-resolved on every call, so each request is served with the account of its own
+    profile. One client (cache and rate limiter included) is kept per credential pair, which is what stops
+    two profiles that use different accounts from sharing, or constantly discarding, each other's data.
     """
     creds, source = resolve_credentials(environ)
     if creds is None:
         raise TrelloNotConnected("Trello credentials are not configured")
     fingerprint = (creds, _transport_override)
     with _shared_lock:
-        if _shared["client"] is None or _shared["fingerprint"] != fingerprint:
-            _shared["client"] = TrelloClient(creds, transport=_transport_override)
-            _shared["fingerprint"] = fingerprint
-        return _shared["client"], source
+        client = _shared.pop(fingerprint, None)
+        if client is None:
+            client = TrelloClient(creds, transport=_transport_override)
+        _shared[fingerprint] = client
+        while len(_shared) > _SHARED_MAX:
+            _shared.pop(next(iter(_shared)))
+        return client, source

@@ -48,6 +48,11 @@ class PluginApiTests(unittest.TestCase):
         patcher = mock.patch.object(Path, "home", return_value=self.home)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.root = base / "root"  # the app-wide home; this request's home is `self.hermes`
+        self.root.mkdir()
+        root_patch = mock.patch.object(C, "ROOT_HOME", self.root)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         env = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.hermes)})
         env.start()
         self.addCleanup(env.stop)
@@ -87,7 +92,7 @@ class PluginApiTests(unittest.TestCase):
     def test_health_not_connected(self):
         response = self.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"connected": False, "member": None, "source": None})
+        self.assertEqual(response.json(), {"connected": False, "member": None, "source": None, "scope": None})
 
     def test_health_connected(self):
         self.connect_env()
@@ -97,7 +102,7 @@ class PluginApiTests(unittest.TestCase):
         body = self.get("/health").json()
         self.assertEqual(
             body,
-            {"connected": True, "member": {"id": oid(20), "username": "ada", "full_name": "Ada Demo"}, "source": "env"},
+            {"connected": True, "member": {"id": oid(20), "username": "ada", "full_name": "Ada Demo"}, "source": "env", "scope": "env"},
         )
 
     def test_health_with_rejected_credentials(self):
@@ -122,9 +127,10 @@ class PluginApiTests(unittest.TestCase):
         response = self.http.post(self.base + "/credentials", json={"api_key": KEY, "token": TOKEN})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["member"]["username"], "ada")
-        self.assertEqual(response.json()["source"], "file")
+        self.assertEqual(response.json()["source"], "app")
+        self.assertEqual((response.json()["scope"], response.json()["scope_requested"]), ("app", "app"))
         self.assertNotIn(TOKEN, response.text)
-        path = self.hermes / "trello-browser" / "credentials.json"
+        path = self.root / "trello-browser" / "credentials.json"
         self.assertEqual(json.loads(path.read_text()), {"api_key": KEY, "token": TOKEN})
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
@@ -139,6 +145,7 @@ class PluginApiTests(unittest.TestCase):
         response = self.http.post(self.base + "/credentials", json={"api_key": KEY, "token": TOKEN})
         self.assert_error(response, 401, "credentials_rejected")
         self.assertFalse((self.hermes / "trello-browser").exists())
+        self.assertFalse((self.root / "trello-browser").exists())
 
     def test_post_credentials_bad_shape(self):
         response = self.http.post(self.base + "/credentials", json={"api_key": "x", "token": TOKEN})
@@ -154,8 +161,107 @@ class PluginApiTests(unittest.TestCase):
         response = self.http.delete(self.base + "/credentials")
         self.assertEqual(response.status_code, 204)
         self.assertEqual(response.content, b"")
-        self.assertFalse((self.hermes / "trello-browser" / "credentials.json").exists())
+        self.assertFalse((self.root / "trello-browser" / "credentials.json").exists())
         self.assertEqual(self.http.delete(self.base + "/credentials").status_code, 204)
+
+    # -- credential scopes ---------------------------------------------------
+
+    def app_file(self):
+        return self.root / "trello-browser" / "credentials.json"
+
+    def profile_file(self):
+        return self.hermes / "trello-browser" / "credentials.json"
+
+    def member_ok(self):
+        self.transport.routes[("GET", "/1/members/me")] = resp({"id": oid(20), "username": "ada", "fullName": "Ada Demo"})
+
+    def test_post_credentials_with_profile_scope_stores_them_for_this_profile_only(self):
+        self.member_ok()
+        response = self.http.post(self.base + "/credentials", json={"api_key": KEY, "token": TOKEN, "scope": "profile"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual((body["source"], body["scope"], body["scope_requested"]), ("profile", "profile", "profile"))
+        self.assertEqual(json.loads(self.profile_file().read_text()), {"api_key": KEY, "token": TOKEN})
+        self.assertFalse(self.app_file().exists())
+        self.assertNotIn(TOKEN, response.text)
+        self.assertEqual(self.get("/health").json()["scope"], "profile")
+
+    def test_post_credentials_with_explicit_app_scope(self):
+        self.member_ok()
+        response = self.http.post(self.base + "/credentials", json={"api_key": KEY, "token": TOKEN, "scope": "app"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["scope"], "app")
+        self.assertTrue(self.app_file().exists())
+        self.assertFalse(self.profile_file().exists())
+
+    def test_post_credentials_profile_scope_without_a_separate_profile_reports_the_fallback(self):
+        self.member_ok()
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.root)}):
+            response = self.http.post(self.base + "/credentials", json={"api_key": KEY, "token": TOKEN, "scope": "profile"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual((body["scope"], body["scope_requested"], body["source"]), ("app", "profile", "app"))
+        self.assertTrue(self.app_file().exists())
+
+    def test_post_credentials_unknown_scope_is_rejected_before_any_request(self):
+        for scope in ("everyone", "", None, 5):
+            response = self.http.post(self.base + "/credentials", json={"api_key": KEY, "token": TOKEN, "scope": scope})
+            self.assert_error(response, 422, "invalid_request")
+        self.assertEqual(self.transport.calls, [])
+        self.assertFalse(self.app_file().exists() or self.profile_file().exists())
+
+    def test_profile_credentials_win_over_app_credentials_for_ordinary_routes(self):
+        C.save_credentials("appkey-1234", "apptoken-1234", scope="app")
+        C.save_credentials(KEY, TOKEN, scope="profile")
+        self.assertEqual(self.get(f"/boards/{BOARD}/view").status_code, 200)
+        self.assertEqual(self.transport.calls[0][2]["token"], TOKEN)
+
+    def test_get_credentials_returns_the_full_status(self):
+        C.save_credentials(KEY, TOKEN, scope="app")
+        body = self.get("/credentials").json()
+        self.assertEqual(
+            body,
+            {
+                "configured": True, "source": "app", "active_scope": "app", "env_partial": False,
+                "app_file": True, "profile_file": False, "profile_overrides": False,
+                "profile_is_root": False, "profile_home": str(self.hermes),
+            },
+        )
+        C.save_credentials(KEY, TOKEN, scope="profile")
+        body = self.get("/credentials").json()
+        self.assertEqual((body["source"], body["profile_file"], body["profile_overrides"]), ("profile", True, True))
+        self.assertNotIn(TOKEN, json.dumps(body))
+        self.assertNotIn(KEY, json.dumps(body))
+
+    def test_delete_with_scope_removes_only_that_scope(self):
+        C.save_credentials(KEY, TOKEN, scope="app")
+        C.save_credentials(KEY, TOKEN, scope="profile")
+        self.assertEqual(self.http.delete(self.base + "/credentials?scope=profile").status_code, 204)
+        self.assertFalse(self.profile_file().exists())
+        self.assertTrue(self.app_file().exists())
+        self.assertEqual(self.http.delete(self.base + "/credentials?scope=app").status_code, 204)
+        self.assertFalse(self.app_file().exists())
+
+    def test_delete_without_scope_removes_the_one_in_use(self):
+        C.save_credentials(KEY, TOKEN, scope="app")
+        C.save_credentials(KEY, TOKEN, scope="profile")
+        self.assertEqual(self.http.delete(self.base + "/credentials").status_code, 204)
+        self.assertFalse(self.profile_file().exists(), "the profile file was the active one")
+        self.assertTrue(self.app_file().exists())
+        self.assertEqual(self.http.delete(self.base + "/credentials").status_code, 204)
+        self.assertFalse(self.app_file().exists(), "now the app file is the active one")
+
+    def test_delete_without_scope_never_touches_files_behind_environment_credentials(self):
+        C.save_credentials(KEY, TOKEN, scope="app")
+        C.save_credentials(KEY, TOKEN, scope="profile")
+        self.connect_env()
+        self.assertEqual(self.http.delete(self.base + "/credentials").status_code, 204)
+        self.assertTrue(self.app_file().exists() and self.profile_file().exists())
+
+    def test_delete_unknown_scope_is_rejected(self):
+        C.save_credentials(KEY, TOKEN, scope="app")
+        self.assert_error(self.http.delete(self.base + "/credentials?scope=everyone"), 422, "invalid_request")
+        self.assertTrue(self.app_file().exists())
 
     # -- reads --------------------------------------------------------------
 

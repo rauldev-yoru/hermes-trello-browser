@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,6 +29,11 @@ def load_client_module():
 
 
 C = load_client_module()
+
+# No test may ever reach the real app-wide credentials: the root home is redirected for the whole run, and
+# individual tests then patch it again with their own temporary directory.
+_SANDBOX = tempfile.mkdtemp(prefix="trello-tests-")
+C.ROOT_HOME = Path(_SANDBOX) / "app-root"
 
 KEY = "k" * 32
 TOKEN = "t" * 64
@@ -808,18 +814,27 @@ class CredentialsTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
         self.home = base / "home"
-        self.hermes = base / "profile"
-        self.home.mkdir()
-        self.hermes.mkdir()
-        patcher = mock.patch.object(Path, "home", return_value=self.home)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.env = {"HERMES_HOME": str(self.hermes)}
+        self.root = base / "root"  # the app-wide home
+        self.profile = base / "profile"  # this request's home
+        for d in (self.home, self.root, self.profile):
+            d.mkdir()
+        for patcher in (
+            mock.patch.object(Path, "home", return_value=self.home),
+            mock.patch.object(C, "ROOT_HOME", self.root),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.env = {"HERMES_HOME": str(self.profile)}
 
     def write(self, directory, key="rootkey-1234", token="roottoken-1234"):
         target = directory / "trello-browser"
         target.mkdir(parents=True, exist_ok=True)
         (target / "credentials.json").write_text(json.dumps({"api_key": key, "token": token}))
+
+    def file_of(self, directory):
+        return directory / "trello-browser" / "credentials.json"
+
+    # -- resolution ----------------------------------------------------------
 
     def test_nothing_configured(self):
         creds, source = C.resolve_credentials(self.env)
@@ -827,66 +842,223 @@ class CredentialsTests(unittest.TestCase):
         self.assertIsNone(source)
         self.assertEqual(
             C.credentials_status(self.env),
-            {"configured": False, "source": None, "env_partial": False, "file_present": False},
+            {
+                "configured": False, "source": None, "active_scope": None, "env_partial": False,
+                "app_file": False, "profile_file": False, "profile_overrides": False,
+                "profile_is_root": False, "profile_home": str(self.profile),
+            },
         )
 
-    def test_env_wins_over_files(self):
-        self.write(self.hermes, "filekey-1234", "filetoken-1234")
+    def test_env_wins_over_both_files(self):
+        self.write(self.profile, "profilekey", "profiletoken")
+        self.write(self.root)
         env = {**self.env, "TRELLO_API_KEY": "envkey-1234", "TRELLO_TOKEN": "envtoken-1234"}
         creds, source = C.resolve_credentials(env)
         self.assertEqual((creds.api_key, creds.token, source), ("envkey-1234", "envtoken-1234", "env"))
+        status = C.credentials_status(env)
+        self.assertEqual((status["source"], status["active_scope"]), ("env", "env"))
+        self.assertEqual((status["app_file"], status["profile_file"], status["profile_overrides"]), (True, True, False))
 
     def test_partial_env_is_ignored_and_reported(self):
         env = {**self.env, "TRELLO_API_KEY": "envkey-1234"}
         self.assertIsNone(C.resolve_credentials(env)[0])
         self.assertTrue(C.credentials_status(env)["env_partial"])
 
-    def test_hermes_home_beats_root_fallback(self):
-        self.write(self.hermes, "profilekey", "profiletoken")
-        self.write(self.home / ".hermes")
+    def test_profile_file_beats_app_file(self):
+        self.write(self.profile, "profilekey", "profiletoken")
+        self.write(self.root)
         creds, source = C.resolve_credentials(self.env)
-        self.assertEqual((creds.api_key, source), ("profilekey", "file"))
-
-    def test_root_fallback_used_last(self):
-        self.write(self.home / ".hermes", "rootkey-1234", "roottoken-1234")
-        creds, source = C.resolve_credentials(self.env)
-        self.assertEqual((creds.api_key, source), ("rootkey-1234", "file"))
-
-    def test_save_writes_private_file_and_status_hides_secrets(self):
-        path = C.save_credentials("newkey-12345", "newtoken-12345", self.env)
-        self.assertEqual(path, self.hermes / "trello-browser" / "credentials.json")
-        if os.name == "posix":
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
-        self.assertEqual(json.loads(path.read_text()), {"api_key": "newkey-12345", "token": "newtoken-12345"})
-        self.assertEqual([p.name for p in path.parent.iterdir()], ["credentials.json"])
+        self.assertEqual((creds.api_key, source), ("profilekey", "profile"))
         status = C.credentials_status(self.env)
-        self.assertEqual(status["source"], "file")
-        self.assertNotIn("newtoken", json.dumps(status))
-        self.assertNotIn("newkey", json.dumps(status))
+        self.assertEqual((status["source"], status["active_scope"]), ("profile", "profile"))
+        self.assertEqual((status["app_file"], status["profile_file"], status["profile_overrides"]), (True, True, True))
 
-    def test_save_rejects_garbage_and_writes_nothing(self):
-        for key, token in (("", "tokentoken1"), ("short", "tokentoken1"), ("has space 1234", "tokentoken1"),
-                           ("keykeykey1", "bad\ntoken1234"), (None, "tokentoken1")):
-            with self.assertRaises(ValueError):
-                C.save_credentials(key, token, self.env)
-        self.assertFalse((self.hermes / "trello-browser").exists())
+    def test_app_file_used_when_the_profile_has_none(self):
+        self.write(self.root, "rootkey-1234", "roottoken-1234")
+        creds, source = C.resolve_credentials(self.env)
+        self.assertEqual((creds.api_key, source), ("rootkey-1234", "app"))
+        status = C.credentials_status(self.env)
+        self.assertEqual((status["source"], status["active_scope"]), ("app", "app"))
+        self.assertEqual((status["app_file"], status["profile_file"], status["profile_overrides"]), (True, False, False))
 
-    def test_delete_only_touches_active_home(self):
-        C.save_credentials("newkey-12345", "newtoken-12345", self.env)
-        self.write(self.home / ".hermes")
-        self.assertTrue(C.delete_credentials(self.env))
-        self.assertFalse(C.delete_credentials(self.env))
-        self.assertTrue((self.home / ".hermes" / "trello-browser" / "credentials.json").exists())
+    def test_profile_file_alone_is_used(self):
+        self.write(self.profile, "profilekey", "profiletoken")
+        creds, source = C.resolve_credentials(self.env)
+        self.assertEqual((creds.api_key, source), ("profilekey", "profile"))
+        status = C.credentials_status(self.env)
+        self.assertEqual((status["app_file"], status["profile_file"]), (False, True))
 
-    def test_default_home_when_hermes_home_unset(self):
-        self.assertEqual(C.credentials_file({}), self.home / ".hermes" / "trello-browser" / "credentials.json")
+    def test_without_a_separate_profile_the_app_file_is_the_only_file(self):
+        env = {"HERMES_HOME": str(self.root)}
+        self.write(self.root)
+        creds, source = C.resolve_credentials(env)
+        self.assertEqual(source, "app")
+        status = C.credentials_status(env)
+        self.assertEqual(
+            (status["profile_is_root"], status["profile_file"], status["profile_overrides"], status["app_file"]),
+            (True, False, False, True),
+        )
+
+    def test_status_never_contains_secrets(self):
+        self.write(self.profile, "profilekey-secret", "profiletoken-secret")
+        self.write(self.root, "rootkey-secret", "roottoken-secret")
+        dumped = json.dumps(C.credentials_status(self.env))
+        for secret in ("profilekey-secret", "profiletoken-secret", "rootkey-secret", "roottoken-secret"):
+            self.assertNotIn(secret, dumped)
 
     def test_corrupt_file_is_treated_as_missing(self):
-        target = self.hermes / "trello-browser"
+        target = self.profile / "trello-browser"
         target.mkdir()
         (target / "credentials.json").write_text("{not json")
         self.assertIsNone(C.resolve_credentials(self.env)[0])
+        self.assertFalse(C.credentials_status(self.env)["profile_file"])
+        self.write(self.root)
+        self.assertEqual(C.resolve_credentials(self.env)[1], "app", "a corrupt profile file does not hide the app file")
+
+    # -- saving --------------------------------------------------------------
+
+    def test_save_defaults_to_the_app_scope(self):
+        saved = C.save_credentials("newkey-12345", "newtoken-12345", environ=self.env)
+        self.assertEqual(saved, {"path": self.file_of(self.root), "scope": "app", "requested_scope": "app"})
+        self.assertFalse(self.file_of(self.profile).exists())
+
+    def test_save_by_scope_writes_private_files_and_hides_secrets(self):
+        for scope, home in (("app", self.root), ("profile", self.profile)):
+            saved = C.save_credentials("newkey-12345", "newtoken-12345", scope=scope, environ=self.env)
+            path = saved["path"]
+            self.assertEqual((path, saved["scope"], saved["requested_scope"]), (self.file_of(home), scope, scope))
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            self.assertEqual(json.loads(path.read_text()), {"api_key": "newkey-12345", "token": "newtoken-12345"})
+            self.assertEqual([p.name for p in path.parent.iterdir()], ["credentials.json"], "atomic write leaves no temp file")
+        status = C.credentials_status(self.env)
+        self.assertEqual(status["source"], "profile")
+        self.assertNotIn("newtoken", json.dumps(status))
+        self.assertNotIn("newkey", json.dumps(status))
+
+    def test_saving_one_scope_leaves_the_other_alone(self):
+        self.write(self.root, "rootkey-1234", "roottoken-1234")
+        C.save_credentials("profilekey-1", "profiletoken-1", scope="profile", environ=self.env)
+        self.assertEqual(json.loads(self.file_of(self.root).read_text())["api_key"], "rootkey-1234")
+        C.save_credentials("rootkey-5678", "roottoken-5678", scope="app", environ=self.env)
+        self.assertEqual(json.loads(self.file_of(self.profile).read_text())["api_key"], "profilekey-1")
+
+    def test_profile_scope_degrades_to_the_root_without_a_separate_profile(self):
+        env = {"HERMES_HOME": str(self.root)}
+        saved = C.save_credentials("newkey-12345", "newtoken-12345", scope="profile", environ=env)
+        self.assertEqual(saved, {"path": self.file_of(self.root), "scope": "app", "requested_scope": "profile"})
+        self.assertEqual(C.credentials_status(env)["source"], "app")
+
+    def test_save_rejects_unknown_scope_and_garbage_and_writes_nothing(self):
+        with self.assertRaises(ValueError):
+            C.save_credentials("newkey-12345", "newtoken-12345", scope="everyone", environ=self.env)
+        for key, token in (("", "tokentoken1"), ("short", "tokentoken1"), ("has space 1234", "tokentoken1"),
+                           ("keykeykey1", "bad\ntoken1234"), (None, "tokentoken1")):
+            for scope in ("app", "profile"):
+                with self.assertRaises(ValueError):
+                    C.save_credentials(key, token, scope=scope, environ=self.env)
+        self.assertFalse((self.profile / "trello-browser").exists())
+        self.assertFalse((self.root / "trello-browser").exists())
+
+    # -- deleting ------------------------------------------------------------
+
+    def test_delete_only_touches_the_chosen_scope(self):
+        C.save_credentials("profilekey-1", "profiletoken-1", scope="profile", environ=self.env)
+        C.save_credentials("rootkey-1234", "roottoken-1234", scope="app", environ=self.env)
+        self.assertTrue(C.delete_credentials(scope="profile", environ=self.env))
+        self.assertFalse(C.delete_credentials(scope="profile", environ=self.env))
+        self.assertTrue(self.file_of(self.root).exists())
+        self.assertTrue(C.delete_credentials(scope="app", environ=self.env))
+        self.assertFalse(self.file_of(self.root).exists())
+
+    def test_delete_defaults_to_the_app_scope(self):
+        C.save_credentials("profilekey-1", "profiletoken-1", scope="profile", environ=self.env)
+        C.save_credentials("rootkey-1234", "roottoken-1234", scope="app", environ=self.env)
+        self.assertTrue(C.delete_credentials(environ=self.env))
+        self.assertTrue(self.file_of(self.profile).exists())
+
+    def test_delete_rejects_unknown_scope(self):
+        with self.assertRaises(ValueError):
+            C.delete_credentials(scope="everyone", environ=self.env)
+
+    def test_delete_profile_without_a_separate_profile_removes_the_app_file(self):
+        env = {"HERMES_HOME": str(self.root)}
+        self.write(self.root)
+        self.assertTrue(C.delete_credentials(scope="profile", environ=env))
+        self.assertFalse(self.file_of(self.root).exists())
+
+    # -- homes ----------------------------------------------------------------
+
+    def test_default_home_when_hermes_home_unset(self):
+        self.assertEqual(C.effective_home({}), self.home / ".hermes")
+        self.assertEqual(C.credentials_path("profile", {}), self.home / ".hermes" / "trello-browser" / "credentials.json")
+
+    def test_effective_home_follows_the_hermes_context_home(self):
+        ctx_home = Path(self.tmp.name) / "context-home"
+        fake = types.SimpleNamespace(get_hermes_home=lambda: ctx_home)
+        with mock.patch.dict(sys.modules, {"hermes_constants": fake}):
+            self.assertEqual(C.effective_home(), ctx_home)
+
+    def test_effective_home_without_hermes_uses_the_environment(self):
+        with mock.patch.dict(sys.modules, {"hermes_constants": None}):  # makes the import raise ImportError
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.profile)}):
+                self.assertEqual(C.effective_home(), self.profile)
+            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(C.effective_home(), self.home / ".hermes")
+
+    def test_effective_home_survives_a_failing_hermes_lookup(self):
+        def boom():
+            raise RuntimeError("no home")
+
+        with mock.patch.dict(sys.modules, {"hermes_constants": types.SimpleNamespace(get_hermes_home=boom)}):
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.profile)}):
+                self.assertEqual(C.effective_home(), self.profile)
+
+    def test_each_request_is_resolved_in_its_own_profile(self):
+        """The live (no ``environ``) path: two profiles, two accounts, one shared app account."""
+        other = Path(self.tmp.name) / "other-profile"
+        other.mkdir()
+        self.write(self.profile, "profilekey-A", "profiletoken-A")
+        self.write(other, "profilekey-B", "profiletoken-B")
+        self.write(self.root, "rootkey-1234", "roottoken-1234")
+        current = {"home": self.profile}
+        fake = types.SimpleNamespace(get_hermes_home=lambda: current["home"])
+        with mock.patch.dict(sys.modules, {"hermes_constants": fake}), mock.patch.dict(os.environ, {}, clear=False):
+            for var in ("TRELLO_API_KEY", "TRELLO_TOKEN"):
+                os.environ.pop(var, None)
+            seen = []
+            for home in (self.profile, other, self.profile):
+                current["home"] = home
+                creds, source = C.resolve_credentials()
+                seen.append((creds.api_key, source))
+            self.assertEqual(seen, [("profilekey-A", "profile"), ("profilekey-B", "profile"), ("profilekey-A", "profile")])
+            current["home"] = Path(self.tmp.name) / "profile-without-file"
+            creds, source = C.resolve_credentials()
+            self.assertEqual((creds.api_key, source), ("rootkey-1234", "app"))
+
+    def test_root_home_is_captured_from_the_process_home(self):
+        raw = str(Path(self.tmp.name) / "process-home")
+        with mock.patch.dict(sys.modules, {"hermes_constants": None}), mock.patch.dict(os.environ, {"HERMES_HOME": raw}):
+            self.assertEqual(C._capture_root_home(), Path(raw))
+        env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+        with mock.patch.dict(sys.modules, {"hermes_constants": None}), mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(C._capture_root_home(), self.home / ".hermes")
+
+    def test_root_home_asks_hermes_for_the_root_of_a_named_profile(self):
+        tree_root = Path(self.tmp.name) / "tree-root"
+        fake = types.SimpleNamespace(get_default_hermes_root=lambda: tree_root)
+        profile_home = str(tree_root / "profiles" / "work")
+        with mock.patch.dict(sys.modules, {"hermes_constants": fake}), mock.patch.dict(os.environ, {"HERMES_HOME": profile_home}):
+            self.assertEqual(C._capture_root_home(), tree_root)
+
+        def boom():
+            raise RuntimeError("no root")
+
+        with mock.patch.dict(sys.modules, {"hermes_constants": types.SimpleNamespace(get_default_hermes_root=boom)}):
+            with mock.patch.dict(os.environ, {"HERMES_HOME": profile_home}):
+                self.assertEqual(C._capture_root_home(), Path(profile_home))
 
 
 class SharedClientTests(unittest.TestCase):
@@ -894,9 +1066,28 @@ class SharedClientTests(unittest.TestCase):
         self.addCleanup(C.set_transport_override, None)
 
     def test_not_connected(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(Path, "home", return_value=Path(tmp)):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(Path, "home", return_value=Path(tmp)), \
+                mock.patch.object(C, "ROOT_HOME", Path(tmp) / "root"):
             with self.assertRaises(C.TrelloNotConnected):
                 C.shared_client({"HERMES_HOME": str(Path(tmp) / "profile")})
+
+    def test_each_credential_pair_keeps_its_own_client(self):
+        C.set_transport_override(FakeTransport())
+        env_a = {"TRELLO_API_KEY": "aaaaaaaa", "TRELLO_TOKEN": "bbbbbbbb"}
+        env_b = {"TRELLO_API_KEY": "cccccccc", "TRELLO_TOKEN": "dddddddd"}
+        a1, _ = C.shared_client(env_a)
+        b1, _ = C.shared_client(env_b)
+        a2, _ = C.shared_client(env_a)
+        b2, _ = C.shared_client(env_b)
+        self.assertIsNot(a1, b1)
+        self.assertIs(a1, a2, "two profiles on different accounts do not evict each other")
+        self.assertIs(b1, b2)
+
+    def test_the_client_pool_is_bounded(self):
+        C.set_transport_override(FakeTransport())
+        for i in range(C._SHARED_MAX + 3):
+            C.shared_client({"TRELLO_API_KEY": f"key-{i:05d}", "TRELLO_TOKEN": f"tok-{i:05d}"})
+        self.assertEqual(len(C._shared), C._SHARED_MAX)
 
     def test_reused_until_credentials_change(self):
         C.set_transport_override(FakeTransport())

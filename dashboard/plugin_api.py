@@ -10,7 +10,7 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Body, Response
 from fastapi.exceptions import RequestValidationError
@@ -116,6 +116,8 @@ class CredentialsBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     api_key: str
     token: str
+    # "app": one account for every profile (default). "profile": only the profile serving this request.
+    scope: Literal["app", "profile"] = "app"
 
 
 class CardCreateBody(BaseModel):
@@ -161,15 +163,16 @@ class ItemPatchBody(BaseModel):
 def health():
     creds, source = C.resolve_credentials()
     if creds is None:
-        return {"connected": False, "member": None, "source": None}
+        return {"connected": False, "member": None, "source": None, "scope": None}
     try:
         member = C.shared_client()[0].member()
     except C.TrelloAuthError:
-        return {"connected": False, "member": None, "source": source, "error": "credentials_rejected"}
+        return {"connected": False, "member": None, "source": source, "scope": source, "error": "credentials_rejected"}
     return {
         "connected": True,
         "member": {k: member[k] for k in ("id", "username", "full_name")},
         "source": source,
+        "scope": source,
     }
 
 
@@ -186,19 +189,24 @@ def credentials_save(body: CredentialsBody):
         transport=C._transport_override,
     )
     member = candidate.member()  # raises TrelloAuthError on bad credentials
-    C.save_credentials(body.api_key, body.token)
+    saved = C.save_credentials(body.api_key, body.token, scope=body.scope)
     status = C.credentials_status()
     return {
         "connected": True,
         "member": {k: member[k] for k in ("id", "username", "full_name")},
         "source": status["source"],
+        "scope": saved["scope"],
+        "scope_requested": saved["requested_scope"],
         "shadowed_by_env": status["source"] == "env",
     }
 
 
 @router.delete("/credentials", status_code=204, response_class=Response)
-def credentials_delete():
-    C.delete_credentials()
+def credentials_delete(scope: Optional[Literal["app", "profile"]] = None):
+    # Without a scope, remove the file that is in use. Environment variables are not ours to delete.
+    target = scope or C.credentials_status()["active_scope"]
+    if target in C.SCOPES:
+        C.delete_credentials(scope=target)
     return Response(status_code=204)
 
 

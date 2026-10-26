@@ -137,6 +137,9 @@ class HandlerTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"HERMES_HOME": str(Path(self.tmp.name) / "profile")})
         env.start()
         self.addCleanup(env.stop)
+        root_patch = mock.patch.object(C, "ROOT_HOME", Path(self.tmp.name) / "root")
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         for var in ("TRELLO_API_KEY", "TRELLO_TOKEN"):
             os.environ.pop(var, None)
 
