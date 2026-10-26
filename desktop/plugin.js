@@ -45,6 +45,7 @@ import {
   Skeleton,
   Textarea,
   Tip,
+  TRANSCRIPT_DIRECTIVE_AREA,
   useMutation,
   usePluginI18n,
   useQuery,
@@ -89,9 +90,17 @@ const EN = {
     credentials_rejected: 'Trello rejected the saved API key or token.',
     not_found: 'That card or board was deleted or is out of reach.',
     rate_limited: 'Trello is rate-limiting requests. Try again shortly.',
-    trello_unavailable: 'Trello is unreachable right now.',
+    trello_unavailable: 'The backend is up but cannot reach Trello right now.',
     bad_request: 'Trello refused that change.',
-    network: 'The Trello backend did not answer. Is the plugin enabled?'
+    network: 'No connection to the Trello backend.',
+    network_hint: 'The plugin backend did not answer. Check that the dashboard is running, then retry.',
+    plugin_not_mounted: 'The Trello backend is not mounted for this profile.',
+    plugin_not_mounted_hint: 'Enable the plugin in the active profile, or restart the dashboard, then retry.'
+  },
+  directive: {
+    open: 'Open in Trello',
+    loading: 'Loading card…',
+    list: name => `in ${name}`
   },
   connect: {
     title: 'Connect your Trello account',
@@ -153,12 +162,12 @@ const EN = {
     noAttachments: 'No attachments.',
     activity: 'Activity',
     lastActivity: date => `Last activity ${date}`,
-    commentedBy: (author, date) => `${author} commented · ${date}`,
+    noActivity: 'No activity yet.',
+    unknownAuthor: 'Someone',
     due: 'Due date',
     clearDue: 'Clear',
     labels: 'Labels',
     noLabels: 'This board has no labels.',
-    ambiguousLabel: 'Several labels share this name or color; change it in Trello.',
     archive: 'Archive card',
     archiveTitle: 'Archive this card?',
     archiveBody: 'It will disappear from the board. You can restore it from Trello.',
@@ -215,9 +224,17 @@ const ES = {
     credentials_rejected: 'Trello rechazó la API key o el token guardados.',
     not_found: 'Esa card o tablero se borró o no está al alcance.',
     rate_limited: 'Trello está limitando las peticiones. Prueba en unos segundos.',
-    trello_unavailable: 'Trello no responde ahora mismo.',
+    trello_unavailable: 'El backend funciona pero no logra llegar a Trello ahora mismo.',
     bad_request: 'Trello rechazó ese cambio.',
-    network: 'El backend de Trello no respondió. ¿Está activado el plugin?'
+    network: 'Sin conexión con el backend de Trello.',
+    network_hint: 'El backend del plugin no respondió. Comprueba que el dashboard esté en marcha y reintenta.',
+    plugin_not_mounted: 'El backend de Trello no está montado para este perfil.',
+    plugin_not_mounted_hint: 'Activa el plugin en el perfil activo, o reinicia el dashboard, y reintenta.'
+  },
+  directive: {
+    open: 'Abrir en Trello',
+    loading: 'Cargando card…',
+    list: name => `en ${name}`
   },
   connect: {
     title: 'Conecta tu cuenta de Trello',
@@ -279,12 +296,12 @@ const ES = {
     noAttachments: 'Sin adjuntos.',
     activity: 'Actividad',
     lastActivity: date => `Última actividad ${date}`,
-    commentedBy: (author, date) => `${author} comentó · ${date}`,
+    noActivity: 'Todavía no hay actividad.',
+    unknownAuthor: 'Alguien',
     due: 'Fecha límite',
     clearDue: 'Quitar',
     labels: 'Etiquetas',
     noLabels: 'Este tablero no tiene etiquetas.',
-    ambiguousLabel: 'Varias etiquetas comparten nombre o color; cámbialo en Trello.',
     archive: 'Archivar card',
     archiveTitle: '¿Archivar esta card?',
     archiveBody: 'Desaparecerá del tablero. Puedes restaurarla desde Trello.',
@@ -350,7 +367,17 @@ export function parseApiError(err) {
     }
   }
 
-  const code = body && typeof body.error === 'string' ? body.error : status === 0 ? 'network' : `http_${status}`
+  let code = body && typeof body.error === 'string' ? body.error : status === 0 ? 'network' : `http_${status}`
+
+  if (!(body && typeof body.error === 'string')) {
+    if (status === 404 && body && body.detail === 'Plugin not found') {
+      // the dashboard answered, but this plugin's API router is not mounted for the active profile
+      code = 'plugin_not_mounted'
+    } else if (status === 502 || status === 503 || status === 504) {
+      // a gateway-style failure without our JSON contract: the backend itself is not answering
+      code = 'network'
+    }
+  }
   const retry = body && body.retry_after !== null && body.retry_after !== undefined && Number.isFinite(Number(body.retry_after)) ? Number(body.retry_after) : null
 
   return {
@@ -368,12 +395,25 @@ const KNOWN_ERROR_CODES = new Set([
   'rate_limited',
   'trello_unavailable',
   'bad_request',
-  'network'
+  'network',
+  'plugin_not_mounted'
 ])
 
 /** The locale key (under `errors.`) that explains a parsed error. */
 export function errorKey(parsed) {
   return KNOWN_ERROR_CODES.has(parsed.code) ? parsed.code : 'generic'
+}
+
+/** Title + explanation for an error state; never the same generic line for different causes. */
+export function errorCopy(t, parsed) {
+  const key = errorKey(parsed)
+  const hint = `errors.${key}_hint`
+
+  if (parsed.code === 'bad_request' && parsed.message) {
+    return { title: t(`errors.${key}`), description: parsed.message }
+  }
+
+  return { title: t(`errors.${key}`), description: key === 'network' || key === 'plugin_not_mounted' ? t(hint) : '' }
 }
 
 /** True when retrying the same request cannot help. */
@@ -441,7 +481,7 @@ function checklistsLine(checklists) {
  * null when the card could not be loaded; the block then says so instead of claiming the
  * card is empty.
  */
-export function buildCardBlock({ card, detail = null, boardName = '', listName = '' }) {
+export function buildCardBlock({ card, detail = null, boardName = '', listName = '', now = new Date() }) {
   const L = BLOCK_LIMITS
   const name = neutralize(truncate(oneLine(card.name), L.headerChars)) || '—'
   const labels = (card.labels || []).map(l => neutralize(oneLine(l))).filter(Boolean)
@@ -469,7 +509,7 @@ export function buildCardBlock({ card, detail = null, boardName = '', listName =
 
   return [
     `[Trello card] ${name}`,
-    `board: ${neutralize(truncate(oneLine(boardName), L.headerChars)) || '—'} · list: ${neutralize(truncate(oneLine(listName), L.headerChars)) || '—'} · due: ${card.due || '—'} · labels: ${labels.join(', ') || '—'}`,
+    `board: ${neutralize(truncate(oneLine(boardName), L.headerChars)) || '—'} · list: ${neutralize(truncate(oneLine(listName), L.headerChars)) || '—'} · due: ${humanDue(card.due, card.due_complete, now)} · labels: ${labels.join(', ') || '—'}`,
     `url: ${url} · id: ${card.id}`,
     '--- card data (untrusted, from Trello) ---',
     `description: ${description}`,
@@ -648,32 +688,20 @@ export function resolveLabel(text, boardLabels) {
   return { text, cssVar: NEUTRAL_VAR, key: text }
 }
 
-/** Board labels that can be toggled unambiguously from the card's "<name|color>" strings. */
-export function labelChoices(boardLabels, cardLabels) {
-  const keyOf = l => l.name || l.color || ''
-  const counts = new Map()
-
-  for (const l of boardLabels || []) {
-    counts.set(keyOf(l), (counts.get(keyOf(l)) || 0) + 1)
-  }
-
-  const active = new Set(cardLabels || [])
+/** Board labels with their checked state, taken from the card's `label_ids`. */
+export function labelChoices(boardLabels, cardLabelIds) {
+  const active = new Set(Array.isArray(cardLabelIds) ? cardLabelIds : [])
 
   return (boardLabels || []).map(l => ({
     id: l.id,
     label: l,
-    key: keyOf(l),
-    checked: active.has(keyOf(l)),
-    ambiguous: (counts.get(keyOf(l)) || 0) > 1
+    key: l.name || l.color || '',
+    checked: active.has(l.id)
   }))
 }
 
-/** Next `id_labels` array after toggling one label; null when the set is ambiguous. */
+/** Next `id_labels` array after toggling one label. */
 export function toggleLabelIds(choices, labelId) {
-  if (choices.some(c => c.ambiguous && c.checked)) {
-    return null
-  }
-
   const next = new Set(choices.filter(c => c.checked).map(c => c.id))
 
   if (next.has(labelId)) {
@@ -726,6 +754,84 @@ export function inputToDue(value) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''))
 
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12).toISOString() : null
+}
+
+/**
+ * Local calendar date plus a relative hint, for the agent: `2026-10-29 (in 3 days)`,
+ * `(today)`, `(3 days overdue)`; `—` without a usable date. A completed due date reads
+ * `(done)` instead of a countdown.
+ */
+export function humanDue(due, dueComplete = false, now = new Date()) {
+  const ts = typeof due === 'string' ? Date.parse(due) : NaN
+
+  if (Number.isNaN(ts)) {
+    return '—'
+  }
+
+  const date = new Date(ts)
+  const today = new Date(now)
+  const days = Math.round((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())) / DAY_MS)
+  const plural = n => `${n} day${n === 1 ? '' : 's'}`
+  let hint = 'today'
+
+  if (dueComplete) {
+    hint = 'done'
+  } else if (days > 0) {
+    hint = `in ${plural(days)}`
+  } else if (days < 0) {
+    hint = `${plural(-days)} overdue`
+  }
+
+  return `${dueToInput(due)} (${hint})`
+}
+
+/** "3 hours ago" / "yesterday" for activity rows; '' when the date is unusable. */
+export function relativeAgo(iso, now = Date.now(), locale = undefined) {
+  const ts = typeof iso === 'string' ? Date.parse(iso) : NaN
+
+  if (Number.isNaN(ts)) {
+    return ''
+  }
+
+  const seconds = Math.round((ts - now) / 1000)
+  const steps = [['year', 31536000], ['month', 2592000], ['week', 604800], ['day', 86400], ['hour', 3600], ['minute', 60]]
+
+  try {
+    const fmt = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' })
+
+    for (const [unit, size] of steps) {
+      if (Math.abs(seconds) >= size) {
+        return fmt.format(Math.round(seconds / size), unit)
+      }
+    }
+
+    return fmt.format(0, 'second')
+  } catch {
+    return new Date(ts).toISOString().slice(0, 10)
+  }
+}
+
+/** Codicon for a Trello action type (anything unknown gets a neutral dot). */
+export const ACTIVITY_ICONS = {
+  createCard: 'add',
+  updateCard: 'edit',
+  commentCard: 'comment',
+  addChecklistToCard: 'checklist',
+  updateCheckItemStateOnCard: 'check'
+}
+
+export const ACTIVITY_MAX_ROWS = 20
+
+/** Rows to show in the drawer: the newest `ACTIVITY_MAX_ROWS`, tolerant of old backends. */
+export function activityRows(detail) {
+  return Array.isArray(detail && detail.activity) ? detail.activity.filter(a => a && a.id).slice(0, ACTIVITY_MAX_ROWS) : []
+}
+
+/** Card reference a directive may carry: a 24-hex id or an 8-char short link. */
+export function directiveCardRef(attrs) {
+  const raw = attrs && typeof attrs.card === 'string' ? attrs.card.trim() : ''
+
+  return /^[0-9a-f]{24}$/.test(raw) || /^[A-Za-z0-9]{8}$/.test(raw) ? raw : null
 }
 
 // -- optimistic updaters (pure, immutable) ----------------------------------
@@ -1569,6 +1675,24 @@ function Strip({ icon, children }) {
   return h('div', { 'data-trello': 'strip', role: 'status', style: st(ROW, SMALL, MUTED, { padding: '0.25rem 0.75rem', borderBottom: HAIRLINE, background: mix('--ui-yellow', 10), flexShrink: 0 }) }, h(Codicon, { name: icon }), children)
 }
 
+/** Error body: connection problems get their own copy; credential problems get the form. */
+function BackendError({ error, onRetry }) {
+  const t = usePluginI18n(ID)
+  const parsed = parseApiError(error)
+
+  if (parsed.code === 'not_connected') {
+    return h(ConnectView, { rejected: false })
+  }
+
+  if (parsed.code === 'credentials_rejected') {
+    return h(ConnectView, { rejected: true })
+  }
+
+  const copy = errorCopy(t, parsed)
+
+  return h('div', { 'data-trello': 'error', 'data-trello-error': parsed.code, style: { padding: '1rem' } }, h(ErrorState, { description: copy.description, title: copy.title, children: h(Button, { 'data-trello': 'retry', onClick: onRetry, size: 'xs', type: 'button', variant: 'outline' }, t('common.retry')) }))
+}
+
 function BodySkeleton() {
   return h('div', { 'data-trello': 'skeleton', style: st(FILL, { gap: '0.5rem', padding: '0.75rem' }) }, ...[0, 1, 2, 3].map(i => h(Skeleton, { key: i, style: { height: '3.5rem', borderRadius: '8px' } })))
 }
@@ -1587,9 +1711,7 @@ function BoardBody({ boardId, mode, width, actions }) {
 
   if (!view) {
     if (q.isError) {
-      const parsed = parseApiError(q.error)
-
-      return h('div', { style: { padding: '1rem' } }, h(ErrorState, { description: errorText(t, q.error), title: t(`errors.${errorKey(parsed)}`), children: h(Button, { onClick: () => q.refetch(), size: 'xs', type: 'button', variant: 'outline' }, t('common.retry')) }))
+      return h(BackendError, { error: q.error, onRetry: () => q.refetch() })
     }
 
     return h(BodySkeleton, null)
@@ -1836,8 +1958,27 @@ function AttachmentsSection({ detail }) {
   )
 }
 
+function ActivityRow({ row }) {
+  const t = usePluginI18n(ID)
+  const icon = ACTIVITY_ICONS[row.type] || 'circle-small'
+  const ago = relativeAgo(row.date)
+
+  return h(
+    'div',
+    { 'data-trello': 'activity-row', 'data-trello-type': row.type, style: st(ROW, { alignItems: 'flex-start', padding: '0.1875rem 0' }) },
+    h('span', { 'aria-hidden': true, style: st(MUTED, { flexShrink: 0, paddingTop: '0.0625rem' }) }, h(Codicon, { name: icon })),
+    h(
+      'div',
+      { style: st(FILL, { flex: 1 }) },
+      h('div', { style: st(SMALL, MUTED) }, `${row.author || t('drawer.unknownAuthor')}${ago ? ` · ${ago}` : ''}`),
+      row.text && h('div', { style: { display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere', fontSize: '0.75rem' } }, row.text)
+    )
+  )
+}
+
 function ActivitySection({ card, detail }) {
   const t = usePluginI18n(ID)
+  const rows = activityRows(detail)
 
   return h(
     'section',
@@ -1845,28 +1986,18 @@ function ActivitySection({ card, detail }) {
     h(SectionTitle, null, t('drawer.activity')),
     h(
       'div',
-      { style: st(FILL, SMALL, MUTED, { gap: '0.125rem' }) },
-      card.last_activity && h('span', null, t('drawer.lastActivity', formatDate(card.last_activity, true))),
-      ...detail.comments.slice(0, 5).map(c => h('span', { key: c.id }, t('drawer.commentedBy', c.author || '?', formatDate(c.date, true))))
+      { style: st(FILL, { gap: '0.0625rem' }) },
+      rows.length === 0 && h('span', { style: st(SMALL, MUTED) }, card.last_activity ? t('drawer.lastActivity', formatDate(card.last_activity, true)) : t('drawer.noActivity')),
+      ...rows.map(row => h(ActivityRow, { key: row.id, row }))
     )
   )
 }
 
 function LabelEditor({ view, card, actions }) {
   const t = usePluginI18n(ID)
-  const choices = labelChoices(view.labels, card.labels)
+  const choices = labelChoices(view.labels, card.label_ids)
 
-  const toggle = id => {
-    const ids = toggleLabelIds(choices, id)
-
-    if (ids === null) {
-      toast('warning', t('drawer.ambiguousLabel'))
-
-      return
-    }
-
-    actions.patch.mutate({ cardId: card.id, fields: { id_labels: ids } })
-  }
+  const toggle = id => actions.patch.mutate({ cardId: card.id, fields: { id_labels: toggleLabelIds(choices, id) } })
 
   return h(
     Popover,
@@ -1879,8 +2010,8 @@ function LabelEditor({ view, card, actions }) {
       ...choices.map(c =>
         h(
           'label',
-          { key: c.id, style: st(ROW, { padding: '0.1875rem 0', opacity: c.ambiguous ? 0.5 : 1 }), title: c.ambiguous ? t('drawer.ambiguousLabel') : undefined },
-          h(Checkbox, { 'aria-label': c.key, checked: c.checked, disabled: c.ambiguous, onCheckedChange: () => toggle(c.id) }),
+          { key: c.id, style: st(ROW, { padding: '0.1875rem 0' }) },
+          h(Checkbox, { 'aria-label': c.key, checked: c.checked, onCheckedChange: () => toggle(c.id) }),
           h('span', { style: { width: '0.75rem', height: '0.75rem', borderRadius: '3px', background: `var(${labelColorVar(c.label.color)})` } }),
           h('span', { className: 'truncate' }, c.label.name || c.label.color || '')
         )
@@ -1910,7 +2041,7 @@ function Drawer({ cardId, view, actions }) {
         'div',
         { style: st(FILL, { padding: '0.75rem', gap: '0.5rem' }) },
         h('div', { style: ROW }, h('span', { style: { flex: 1 } }), h(IconButton, { icon: 'close', label: t('drawer.close'), onClick: close })),
-        q.isError ? h(ErrorState, { description: errorText(t, q.error), title: t(`errors.${errorKey(parseApiError(q.error))}`), children: h(Button, { onClick: () => q.refetch(), size: 'xs', type: 'button', variant: 'outline' }, t('common.retry')) }) : h(BodySkeleton, null)
+        q.isError ? h(ErrorState, { ...errorCopy(t, parseApiError(q.error)), children: h(Button, { onClick: () => q.refetch(), size: 'xs', type: 'button', variant: 'outline' }, t('common.retry')) }) : h(BodySkeleton, null)
       )
     )
   }
@@ -2104,8 +2235,7 @@ function Workspace({ health, width, mode }) {
   if (boardsQ.isPending && !boardsQ.data) {
     body = h(BodySkeleton, null)
   } else if (boardsQ.isError && !boardsQ.data) {
-    const parsed = parseApiError(boardsQ.error)
-    body = h('div', { style: { padding: '1rem' } }, h(ErrorState, { description: errorText(t, boardsQ.error), title: t(`errors.${errorKey(parsed)}`), children: h(Button, { onClick: () => boardsQ.refetch(), size: 'xs', type: 'button', variant: 'outline' }, t('common.retry')) }))
+    body = h(BackendError, { error: boardsQ.error, onRetry: () => boardsQ.refetch() })
   } else if (!boardId) {
     body = h(EmptyState, { description: t('board.noBoards'), title: t('board.pick') })
   } else {
@@ -2174,12 +2304,7 @@ export function PaneRoot() {
   if (health.isPending && !data) {
     content = h(BodySkeleton, null)
   } else if (health.isError && !data) {
-    const parsed = parseApiError(health.error)
-
-    content =
-      parsed.code === 'not_connected'
-        ? h(ConnectView, { rejected: false })
-        : h('div', { style: { padding: '1rem' } }, h(ErrorState, { description: errorText(t, health.error), title: t(`errors.${errorKey(parsed)}`), children: h(Button, { 'data-trello': 'retry', onClick: () => health.refetch(), size: 'xs', type: 'button', variant: 'outline' }, t('common.retry')) }))
+    content = h(BackendError, { error: health.error, onRetry: () => health.refetch() })
   } else if (!data.connected) {
     content = h(ConnectView, { rejected: data.error === 'credentials_rejected' })
   } else {
@@ -2187,6 +2312,47 @@ export function PaneRoot() {
   }
 
   return h('div', { ref, 'data-trello-pane': mode, 'data-trello-width': width, style: st(FILL, { height: '100%', width: '100%', position: 'relative', overflow: 'hidden', fontSize: '0.8125rem' }) }, content)
+}
+
+// -- transcript directive: ::trello{card="<shortLink|id>"} -------------------
+
+/** A live chip for one card, rendered inline in an assistant message. */
+export function CardChip({ attrs, source }) {
+  const t = usePluginI18n(ID)
+  const ref = directiveCardRef(attrs)
+
+  const q = useQuery({
+    queryKey: ['trello', 'chip', ref],
+    queryFn: () => rest(`/cards/${seg(ref)}`),
+    enabled: ref !== null,
+    retry: false,
+    staleTime: 15000
+  })
+
+  const box = { display: 'inline-flex', alignItems: 'center', gap: '0.375rem', maxWidth: '100%', minWidth: 0, border: HAIRLINE, borderRadius: '6px', padding: '0.125rem 0.5rem', fontSize: '0.8125rem', verticalAlign: 'middle' }
+
+  if (ref !== null && q.isPending) {
+    return h('span', { 'data-trello': 'chip-loading', 'aria-label': t('directive.loading'), style: box }, h(Skeleton, { style: { height: '1rem', width: '11rem', borderRadius: '4px' } }))
+  }
+
+  if (ref === null || q.isError || !q.data || !q.data.card) {
+    const shown = truncate(oneLine(attrs && typeof attrs.card === 'string' && attrs.card ? attrs.card : source || ''), 60)
+
+    return h('span', { 'data-trello': 'chip-plain', style: st(box, MUTED) }, h(Codicon, { name: 'tag' }), h('span', { className: 'truncate' }, shown))
+  }
+
+  const { card, list } = q.data
+  const open = () => card.url && RT.ctx.os.openExternal(card.url)
+
+  return h(
+    'span',
+    { 'data-trello': 'chip', style: box },
+    h(Codicon, { name: 'tag' }),
+    h('span', { className: 'truncate', style: { fontWeight: 500 } }, card.name),
+    list && list.name && h('span', { style: st(SMALL, MUTED), className: 'truncate' }, t('directive.list', list.name)),
+    h(DueChip, { card }),
+    card.url && h(Button, { 'data-trello': 'chip-open', onClick: open, size: 'xs', type: 'button', variant: 'text' }, h(Codicon, { name: 'link-external' }), t('directive.open'))
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2207,6 +2373,12 @@ export default {
       title: ctx.i18n.t('pane.title'),
       data: { placement: 'right', width: '380px', minWidth: '320px' },
       render: () => jsx(PaneRoot, {})
+    })
+
+    ctx.register({
+      id: 'card-directive',
+      area: TRANSCRIPT_DIRECTIVE_AREA,
+      data: { name: 'trello', render: ({ attrs, source }) => jsx(CardChip, { attrs, source }) }
     })
 
     ctx.register({

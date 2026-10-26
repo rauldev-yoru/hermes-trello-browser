@@ -75,12 +75,25 @@ Send mode (insert / send), refresh interval (off, 15, 25 or 60 s), default board
 and **Disconnect** (`DELETE /credentials`). Values live in `ctx.storage`; the last
 board is remembered there too.
 
+## Transcript directive
+
+The agent can write `::trello{card="<id or short link>"}` as a paragraph of its own and the
+chat renders a live chip: card name, list, due date and an "Open in Trello" button
+(`ctx.os.openExternal`). The card is loaded with `GET /cards/<id>` only when a directive
+appears; while loading the chip is a `Skeleton`. An invalid id, a 404 or any backend error
+degrades to a minimal chip holding the (truncated) attribute text, so the message never breaks.
+
+## Errors
+
+Each cause has its own copy: backend not mounted for the active profile (a 404 whose body
+says `Plugin not found`), no connection to the backend (network error or a bare 502/503/504),
+Trello unreachable (the backend's own 503), rate limiting, and the two credential cases
+(`not_connected`, `credentials_rejected`), which show the connect form instead.
+
 ## Known limits (v1)
 
-- Card activity shows the last-activity time and the latest comments; the backend
-  has no actions feed yet.
-- Labels can be toggled only when the card's `<name|color>` strings map to exactly
-  one board label; otherwise the editor disables the ambiguous rows.
+- Card activity shows the last 20 actions the backend returns (created, updated, comments,
+  checklist changes), with no pagination.
 - No drag and drop between lists (moving uses a menu).
 
 ## Tests
