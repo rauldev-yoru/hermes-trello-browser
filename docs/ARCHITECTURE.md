@@ -538,9 +538,11 @@ author's own setup in code, comments, tests, docs, screenshots or example data
 - **P1** ✅ pane covers the read surface and the writes (move, comment, create,
   checklist items, due, labels, archive) — pending first-run confirmation in the
   real app.
-- **P2** 🚧 the handoff block and the 10 `trello_*` tools exist; the round trip
-  (card → agent → tool write → pane refresh) still needs an end-to-end run from a
-  profile where the plugin is enabled.
+- **P2** ✅ verified end to end: a card sent from the pane reached the composer as
+  the untrusted-fenced block, the agent read the full card, commented and moved it
+  to another list, and the board payload the pane polls reflected both writes. The
+  `trello_*` tool leg of that loop is exercised when a session runs in a profile
+  where the agent half is enabled.
 - **P3** ⏳ assistant actions stay prompt-insert (the `ctx.llm` shortcut is a
   spike); the `::trello{}` transcript directive is not written.
 - **P4** ⏳ not started.
