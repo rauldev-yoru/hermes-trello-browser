@@ -519,6 +519,21 @@ author's own setup in code, comments, tests, docs, screenshots or example data
 | **P3 — assist + polish** | assist buttons (insert-prompt), stale/stale-while-error states, keyboard nav, i18n `es`, `::trello{}` directive, screenshots | full loop usable for a week without opening trello.com |
 | **P4 — publish** | README with GIF, SECURITY disclosure, screenshots on a synthetic demo board, `plugin-catalog/trello-browser.yaml` PR | catalog entry merged, `hermes plugins install trello-browser` works from a clean machine |
 
+### Status
+
+- **P0** ✅ agent half + backend, live-verified against a real board (88 offline
+  tests, `validate`/`doctor` clean); pane written and rendering in the jsdom
+  harness (54 tests).
+- **P1** ✅ pane covers the read surface and the writes (move, comment, create,
+  checklist items, due, labels, archive) — pending first-run confirmation in the
+  real app.
+- **P2** 🚧 the handoff block and the 10 `trello_*` tools exist; the round trip
+  (card → agent → tool write → pane refresh) still needs an end-to-end run from a
+  profile where the plugin is enabled.
+- **P3** ⏳ assistant actions stay prompt-insert (the `ctx.llm` shortcut is a
+  spike); the `::trello{}` transcript directive is not written.
+- **P4** ⏳ not started.
+
 Effort, honestly: P0 ≈ one long session; P1 ≈ two; P2 ≈ one; P3 ≈ one; P4 ≈ one
 plus review latency. The 33k-line `jira-browser` took its author far longer
 because it also does Jira workflows, worktrees and CI — none of that applies here.
