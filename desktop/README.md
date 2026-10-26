@@ -15,6 +15,32 @@ The mode is decided from the pane's own width, measured with a `ResizeObserver`
 | `< 560 px` | list focus | list chips with card counts, one list of cards at a time |
 | `>= 560 px` | columns | one lane per list, horizontal scroll, header with the card count |
 
+Both modes start with the same strip of list chips (name + card count, one row, about 42 px,
+horizontal scroll). In columns mode a click scrolls that lane into view and the lanes that
+are on screen are highlighted (an `IntersectionObserver` on the lanes); in list mode the
+chips are tabs.
+
+Cards are built for long lanes: each one carries `content-visibility: auto` with a
+`contain-intrinsic-size` estimate, so the browser skips style and layout for cards that are
+off screen. Consequences to know about:
+
+- The scrollable height of a lane is an estimate until its cards have been laid out
+  (`CARD_ESTIMATED_HEIGHT`: 84 px comfortable, 56 px compact, close to the median card; the
+  value handed to CSS is the content box, so `CARD_CHROME_HEIGHT` is subtracted). The
+  scrollbar thumb can move a little while you scroll.
+- The browser's find-in-page does not see skipped cards.
+- `scrollIntoView` on a card that is not laid out yet (keyboard selection, `l`/`h`) works
+  through the estimate. jsdom has no layout, so the tests only assert the styles; this
+  has to be exercised in the real app.
+
+Cards also have two densities (Settings > Card density): comfortable, and compact (one-line
+title, labels as colour bars, meta and avatars on one row). Labels show at most three, avatars
+at most three, each with a `+N` chip whose `title` names the rest. The card's action row is an
+overlay on hover or selection, so selecting a card never moves the ones below it.
+
+Cards, checklist items and Markdown blocks are memoized and receive only the props they use,
+so a poll that changes nothing renders no card, and a selection change renders two.
+
 The card drawer opens on the right **inside the pane**, never as a modal over the
 chat.
 
@@ -66,12 +92,14 @@ written. The insert-a-prompt behaviour stays as the fallback. See
 
 ## Keyboard (pane focused, not while typing)
 
-`j` / `k` move the selection, `Enter` opens the card, `Esc` closes the drawer,
-`s` sends the selected card, `c` copies its link.
+`j` / `k` move the selection, `h` / `l` jump to the previous / next list (scroll it into view and
+select its first card; lists without cards are skipped), `Enter` opens the card, `Esc` closes the
+drawer, `s` sends the selected card, `c` copies its link.
 
 ## Settings (gear in the header)
 
-Send mode (insert / send), refresh interval (off, 15, 25 or 60 s), default board and the
+Send mode (insert / send), refresh interval (off, 15, 25 or 60 s), card density
+(comfortable / compact), default board and the
 credentials section below. Values live in `ctx.storage`; the last board is remembered there too.
 
 ### Credentials
@@ -122,7 +150,10 @@ node --test tests/desktop/            # or: node --test tests/desktop/*.test.mjs
 
 `helpers.test.mjs` covers the pure logic and static rules over `plugin.js`
 (imports, colors, classes, i18n parity). `render.test.mjs` mounts the pane with an
-SDK stub and a synthetic in-memory backend: no network, no app.
+SDK stub and a synthetic in-memory backend: no network, no app. `heavy-board.test.mjs` does
+the same with a 207-card board and counts renders per component (a copy of `plugin.js` with a
+counting JSX runtime; the plugin itself is never instrumented), and checks the density,
+overflow and lane-navigation behaviour. None of them depends on real layout.
 
 The tests need `react`, `react-dom`, `jsdom`, `nanostores` and `@nanostores/react`.
 They are looked up in the nearest `node_modules` above the repository, or in

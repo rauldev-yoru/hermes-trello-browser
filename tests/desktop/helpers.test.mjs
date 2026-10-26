@@ -273,9 +273,9 @@ test('desktop helpers', { skip }, async t => {
   })
 
   await t.test('settings, boards and layout helpers', () => {
-    assert.deepEqual(P.normalizeSettings(undefined), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile' })
-    assert.deepEqual(P.normalizeSettings({ sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'app' }), { sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'app' })
-    assert.deepEqual(P.normalizeSettings({ sendMode: 'x', refreshSec: 7, defaultBoard: 5, credentialScope: 'everyone' }), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile' })
+    assert.deepEqual(P.normalizeSettings(undefined), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile', density: 'comfortable' })
+    assert.deepEqual(P.normalizeSettings({ sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'app', density: 'compact' }), { sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'app', density: 'compact' })
+    assert.deepEqual(P.normalizeSettings({ sendMode: 'x', refreshSec: 7, defaultBoard: 5, credentialScope: 'everyone', density: 'tiny' }), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile', density: 'comfortable' })
     assert.equal(P.DEFAULT_SETTINGS.credentialScope, 'profile', 'the default is one account per profile')
     assert.equal(P.normalizeSettings({ credentialScope: 'app' }).credentialScope, 'app', 'a stored choice is respected, not migrated')
     assert.equal(P.normalizeSettings({ credentialScope: 'profile' }).credentialScope, 'profile')

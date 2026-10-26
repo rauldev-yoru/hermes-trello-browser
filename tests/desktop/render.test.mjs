@@ -93,7 +93,9 @@ test('desktop pane render harness', { skip }, async t => {
   await scenario('columns from 560 px, decided by the measured width', { width: 720 }, async ({ root }) => {
     assert.equal($(root, '[data-trello-pane]').dataset.trelloPane, 'columns')
     assert.equal($(root, '[data-trello-pane]').dataset.trelloWidth, '720')
-    assert.equal($$(root, '[data-trello="chip"]').length, 0)
+    // the lane strip is shared with list mode: one chip per lane, with the same counts as the lane headers
+    assert.deepEqual($$(root, '[data-trello="chip"]').map(text), ['Backlog1', 'In progress3', 'Review1', 'Done1'])
+    assert.equal($(root, '[data-trello="lane-strip"]').dataset.mode, 'columns')
 
     const lanes = $$(root, '[data-trello="lane"]')
     assert.equal(lanes.length, 4)

@@ -62,6 +62,47 @@ export const usePluginI18n = id => (key, ...args) => translate(id, key, args)
 
 // -- query layer ------------------------------------------------------------
 
+const isPlainObject = value => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+
+/**
+ * React Query's structural sharing (`replaceEqualDeep`): a new payload keeps the *previous* object for every
+ * subtree that is deep-equal, so a memoized component only sees a new prop where the data really changed.
+ * Without it every refetch hands out all-new objects and any render-count test would be unrealistic.
+ */
+export function replaceEqualDeep(a, b) {
+  if (a === b) {
+    return a
+  }
+
+  const array = Array.isArray(a) && Array.isArray(b)
+
+  if (array || (isPlainObject(a) && isPlainObject(b))) {
+    const aItems = array ? a : Object.keys(a)
+    const bItems = array ? b : Object.keys(b)
+    const copy = array ? new Array(bItems.length) : {}
+    let equalItems = 0
+
+    for (let i = 0; i < bItems.length; i += 1) {
+      const key = array ? i : bItems[i]
+
+      if (a[key] === undefined && b[key] === undefined && (array || aItems.includes(key))) {
+        copy[key] = undefined
+        equalItems += 1
+      } else {
+        copy[key] = replaceEqualDeep(a[key], b[key])
+
+        if (copy[key] === a[key] && a[key] !== undefined) {
+          equalItems += 1
+        }
+      }
+    }
+
+    return aItems.length === bItems.length && equalItems === aItems.length ? a : copy
+  }
+
+  return b
+}
+
 const matches = (key, prefix) => !prefix || prefix.every((part, i) => JSON.stringify(key[i]) === JSON.stringify(part))
 
 class MiniQueryClient {
@@ -95,7 +136,8 @@ class MiniQueryClient {
 
   setQueryData(key, data) {
     const entry = this.entry(key)
-    entry.data = typeof data === 'function' ? data(entry.data) : data
+    const next = typeof data === 'function' ? data(entry.data) : data
+    entry.data = replaceEqualDeep(entry.data, next)
     entry.status = 'success'
     entry.error = null
     this.notify(entry)
@@ -147,7 +189,7 @@ class MiniQueryClient {
 
     entry.promise = (async () => {
       try {
-        entry.data = await fn()
+        entry.data = replaceEqualDeep(entry.data, await fn())
         entry.status = 'success'
         entry.error = null
         entry.updatedAt = Date.now()
@@ -205,6 +247,10 @@ export const queryClient = new MiniQueryClient()
 export const useQueryClient = () => queryClient
 export const optionLog = new Map()
 
+/**
+ * Like React Query's default "tracked" mode: the component re-renders only when a field it actually read during
+ * its last render changed (data, error, status, isPending, isError, isFetching).
+ */
 export function useQuery(options) {
   const [, force] = React.useReducer(x => x + 1, 0)
   const entry = queryClient.entry(options.queryKey)
@@ -212,10 +258,31 @@ export function useQuery(options) {
   entry.options = options
   optionLog.set(entry.hash, options)
 
-  React.useEffect(() => {
-    entry.listeners.add(force)
+  const snapshot = () => ({ data: entry.data, error: entry.error, status: entry.status, isPending: entry.data === undefined && entry.status !== 'error', isError: entry.status === 'error', isFetching: entry.fetching })
+  const rendered = React.useRef({ values: null, read: new Set() })
+  const values = snapshot()
+  rendered.current = { values, read: new Set() }
 
-    return () => entry.listeners.delete(force)
+  const latest = React.useRef(null)
+  latest.current = snapshot
+
+  const listener = React.useRef(null)
+
+  if (!listener.current) {
+    listener.current = () => {
+      const now = latest.current()
+      const { values: before, read } = rendered.current
+
+      if ([...read].some(key => now[key] !== before[key])) {
+        force()
+      }
+    }
+  }
+
+  React.useEffect(() => {
+    entry.listeners.add(listener.current)
+
+    return () => entry.listeners.delete(listener.current)
   }, [entry.hash])
 
   React.useEffect(() => {
@@ -224,15 +291,13 @@ export function useQuery(options) {
     }
   }, [entry.hash, enabled])
 
-  return {
-    data: entry.data,
-    error: entry.error,
-    status: entry.status,
-    isPending: entry.data === undefined && entry.status !== 'error',
-    isError: entry.status === 'error',
-    isFetching: entry.fetching,
-    refetch: () => queryClient.runFetch(entry, options.queryFn)
+  const result = { refetch: () => queryClient.runFetch(entry, options.queryFn) }
+
+  for (const key of Object.keys(values)) {
+    Object.defineProperty(result, key, { enumerable: true, get: () => { rendered.current.read.add(key); return values[key] } })
   }
+
+  return result
 }
 
 export function useMutation(options) {
@@ -263,7 +328,10 @@ export function useMutation(options) {
     }
   }, [])
 
-  return { isPending: pending, mutate: (vars, callbacks) => void run(vars, callbacks).catch(() => {}), mutateAsync: run }
+  // `mutate` keeps its identity between renders, as in React Query
+  const mutate = React.useCallback((vars, callbacks) => void run(vars, callbacks).catch(() => {}), [run])
+
+  return { isPending: pending, mutate, mutateAsync: run }
 }
 
 // -- UI components ----------------------------------------------------------

@@ -35,8 +35,54 @@ export function findNodeModules() {
 export const SKIP_REASON =
   'react, react-dom, jsdom, nanostores and @nanostores/react not found: run `npm i react react-dom jsdom nanostores @nanostores/react` or set TRELLO_TEST_NODE_MODULES'
 
-/** Copy plugin.js next to the SDK stub, point its SDK import at the stub, import both. */
-export async function loadPlugin() {
+/**
+ * A drop-in `react/jsx-runtime` that counts how often each function component is rendered, without touching the
+ * plugin: every function component (and the function inside `memo()`) is wrapped once, by identity, in a function
+ * with the same name. Counters live on `globalThis.__TRELLO_COUNT__`: `calls` by component name, `byCard` by
+ * `props.card.id` for `CardRow`, `byItem` by `props.item.id` for `ItemRow`. Counting is on only while `on` is true.
+ */
+export const COUNT_SHIM = `
+import * as rt from 'react/jsx-runtime'
+import { memo } from 'react'
+const G = (globalThis.__TRELLO_COUNT__ ||= { on: false, total: 0, calls: new Map(), byCard: new Map(), byItem: new Map() })
+const wrapped = new WeakMap()
+const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1)
+function wrapFn(fn) {
+  let w = wrapped.get(fn)
+  if (!w) {
+    const name = fn.displayName || fn.name || 'Anonymous'
+    w = { [name]: function (props, ref) {
+      if (G.on) {
+        G.total += 1
+        bump(G.calls, name)
+        if (name === 'CardRow' && props && props.card) bump(G.byCard, props.card.id)
+        if (name === 'ItemRow' && props && props.item) bump(G.byItem, props.item.id)
+      }
+      return fn(props, ref)
+    } }[name]
+    wrapped.set(fn, w)
+  }
+  return w
+}
+function prep(type) {
+  if (typeof type === 'function' && !(type.prototype && type.prototype.isReactComponent)) return wrapFn(type)
+  if (type && typeof type === 'object' && type.$$typeof === Symbol.for('react.memo') && typeof type.type === 'function') {
+    let w = wrapped.get(type)
+    if (!w) {
+      w = memo(wrapFn(type.type), type.compare || undefined)
+      wrapped.set(type, w)
+    }
+    return w
+  }
+  return type
+}
+export const Fragment = rt.Fragment
+export const jsx = (type, props, key) => rt.jsx(prep(type), props, key)
+export const jsxs = (type, props, key) => rt.jsxs(prep(type), props, key)
+`
+
+/** Copy plugin.js next to the SDK stub, point its SDK import at the stub, import both. `count` adds COUNT_SHIM. */
+export async function loadPlugin({ count = false } = {}) {
   const modules = findNodeModules()
 
   if (!modules) {
@@ -54,7 +100,19 @@ export async function loadPlugin() {
     throw new Error('plugin.js no longer imports from @hermes/plugin-sdk')
   }
 
-  fs.writeFileSync(path.join(dir, 'plugin.mjs'), rewritten)
+  let final = rewritten
+
+  if (count) {
+    final = rewritten.replace("from 'react/jsx-runtime'", "from './jsx-count.mjs'")
+
+    if (final === rewritten) {
+      throw new Error("plugin.js no longer imports 'react/jsx-runtime'")
+    }
+
+    fs.writeFileSync(path.join(dir, 'jsx-count.mjs'), COUNT_SHIM)
+  }
+
+  fs.writeFileSync(path.join(dir, 'plugin.mjs'), final)
 
   const plugin = await import(pathToFileURL(path.join(dir, 'plugin.mjs')).href)
   const sdk = await import(pathToFileURL(path.join(dir, 'sdk-stub.mjs')).href)
@@ -83,6 +141,30 @@ export class FakeResizeObserver {
   }
 }
 
+export class FakeIntersectionObserver {
+  static instances = new Set()
+
+  constructor(callback, options) {
+    this.callback = callback
+    this.options = options
+    this.targets = new Set()
+  }
+
+  observe(target) {
+    this.targets.add(target)
+    FakeIntersectionObserver.instances.add(this)
+  }
+
+  unobserve(target) {
+    this.targets.delete(target)
+  }
+
+  disconnect() {
+    this.targets.clear()
+    FakeIntersectionObserver.instances.delete(this)
+  }
+}
+
 export async function setupDom() {
   const { JSDOM } = await import('jsdom')
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { pretendToBeVisual: true, url: 'http://localhost/' })
@@ -105,6 +187,7 @@ export async function setupDom() {
   }
 
   globalThis.ResizeObserver = FakeResizeObserver
+  globalThis.IntersectionObserver = FakeIntersectionObserver
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
   const React = await import('react')
@@ -164,7 +247,19 @@ export async function setupDom() {
     await settle(4)
   }
 
-  return { dom, window: w, document: w.document, act, settle, mount, click, key, type, fire, resizeTo, React }
+  /** Tell every observer which elements are on screen: `onScreen` are fully visible, everything else is not. */
+  const intersect = async onScreen => {
+    const visible = new Set(onScreen)
+
+    await act(async () => {
+      for (const observer of FakeIntersectionObserver.instances) {
+        observer.callback([...observer.targets].map(target => ({ target, intersectionRatio: visible.has(target) ? 1 : 0, isIntersecting: visible.has(target) })))
+      }
+    })
+    await settle(4)
+  }
+
+  return { dom, window: w, document: w.document, act, settle, mount, click, key, type, fire, resizeTo, intersect, React }
 }
 
 // -- synthetic backend ---------------------------------------------------------
@@ -481,6 +576,335 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
 
   return backend
 }
+
+// -- heavy board fixture -------------------------------------------------------------
+//
+// Shared by the render-count tests and scripts/render_screenshots.mjs. A synthetic stand-in for a real work board: 10 lanes, the first one with 80 cards, titles from 8 to 120
+// characters, cards with and without due dates / labels / members, and one card whose drawer is as heavy as
+// the longest ones seen in practice. Everything comes from a seeded PRNG, so the output is byte-stable.
+
+function mulberry32(seed) {
+  let a = seed >>> 0
+
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+const DAY = 24 * HOUR
+
+const HEAVY_LANES = ['Inbox', 'Triage', 'Backlog — grooming', 'Ready', 'In progress', 'In review', 'QA', 'Blocked / waiting on others', 'Release candidate', 'Done']
+// cards per lane; the first lane is the 80-card one
+const HEAVY_LANE_COUNTS = [80, 6, 14, 9, 22, 11, 5, 3, 17, 40]
+
+const HEAVY_TITLES = [
+  'Checkout — coupon field loses focus after validation',
+  'Export report to CSV',
+  'Rate limit headers missing on the search endpoint',
+  'Dark mode: chart gridlines too faint',
+  'Audit the retry policy of the webhook dispatcher',
+  'Migrate tooltips to the new component',
+  'Empty state for saved filters',
+  'Slow query on the activity feed (p95 above 2s)',
+  'Add a keyboard shortcut to toggle the sidebar',
+  'Typo on the pricing page',
+  'Replace the date picker in the invoice form',
+  'Onboarding checklist does not persist after logout',
+  'Upgrade the build image to the latest LTS',
+  'Document the permission matrix for workspace roles',
+  'Notifications: group by thread instead of by event',
+  'Investigate flaky test in the billing suite',
+  'Mobile nav overlaps the cookie banner on small screens',
+  'Add pagination to the audit log',
+  'Support SSO group mapping for contractors',
+  'Clean up unused feature flags'
+]
+
+// exactly 8 characters each
+const HEAVY_SHORT = ['Fix typo', 'Bump dep', 'Add logs', 'Cache it', 'Lint fix', 'Alt text', 'Dead css', 'Fix nits']
+
+// longer than 120 characters; cut to exactly 120 below
+const HEAVY_LONG_BASES = [
+  'Investigate why the nightly synchronisation job intermittently duplicates invoices for customers that changed plan mid-cycle',
+  'Make the permission checks of the bulk-edit dialog consistent with the single-edit flow, including the audit trail and the undo toast',
+  'Rework the empty, loading and error states of every report so they stop shifting the layout when the data arrives late or twice'
+]
+
+if (!HEAVY_SHORT.every(t => t.length === 8) || !HEAVY_LONG_BASES.every(t => t.length > 120)) {
+  throw new Error('heavy fixture: title pools do not meet the 8/120 character contract')
+}
+
+const heavyLongTitle = i => {
+  const cut = HEAVY_LONG_BASES[i % HEAVY_LONG_BASES.length].slice(0, 120)
+
+  return cut.endsWith(' ') ? `${cut.slice(0, 119)}.` : cut
+}
+
+const HEAVY_DESC = [
+  '# Release 4.2 — regression sweep',
+  '',
+  'This card tracks the **regression sweep** for release 4.2. Nothing ships until every checklist below is green and the rollout notes were reviewed by a second person. Background lives in the [release runbook](https://example.invalid/runbook) and the [incident template](https://example.invalid/incident).',
+  '',
+  '## Scope',
+  '',
+  '- Billing: invoices, proration and the new `retry_policy` defaults',
+  '- Search: the ranking pipeline behind the `search_v2` flag',
+  '- Onboarding: steps 1 to 4 on web and on mobile web',
+  '- Exports: CSV and XLSX for reports larger than 50k rows',
+  '- Permissions: the workspace role matrix after the SSO change',
+  '',
+  '## How to run the sweep',
+  '',
+  'Use the staging stack, never the shared demo tenant. Reset the fixtures first and keep the *seed* identical between runs so failures are comparable:',
+  '',
+  '```bash',
+  'make fixtures SEED=4242',
+  'make sweep ENV=staging SUITE=regression',
+  'make report OUT=build/sweep-4.2.html',
+  '```',
+  '',
+  '## Known risks',
+  '',
+  '1. The proration job runs at 02:00 UTC and overlaps with the nightly export.',
+  '2. `search_v2` doubles the index size; check disk alerts before enabling it for everyone.',
+  '3. SSO group mapping is cached for 15 minutes, so role changes look delayed in the UI.',
+  '',
+  '## Rollout',
+  '',
+  'Ramp in four steps (5%, 25%, 50%, 100%) with at least one hour between steps. Roll back with the **kill switch** described in [the runbook](https://example.invalid/runbook#rollback) if the error budget burns faster than 2x. Post the status in the release channel after every step and attach the dashboard snapshot to this card.',
+  '',
+  '## Notes from the last release',
+  '',
+  '- The export timeout was raised from 30s to 120s and never lowered again.',
+  '- Two customers hit the legacy date picker on Safari; see https://example.invalid/issues/4812 for the repro.',
+  '- The rollback rehearsal took 18 minutes instead of the planned 5.',
+  '',
+  '## Contacts',
+  '',
+  '- Release captain: Ada Demo',
+  '- Billing owner: Lin Demo, on call until Friday',
+  '- Support liaison: see the rota at https://example.invalid/rota'
+].join('\n')
+
+if (HEAVY_DESC.length < 1900 || HEAVY_DESC.length > 2100) {
+  throw new Error(`heavy fixture: description is ${HEAVY_DESC.length} characters, expected about 2000`)
+}
+
+const HEAVY_CHECKLISTS = [
+  {
+    name: 'Pre-flight',
+    items: [
+      'Freeze the release branch', 'Tag the release candidate', 'Reset the staging fixtures with the agreed seed', 'Verify the database migration dry-run output',
+      'Confirm the feature flags are off by default', 'Snapshot the dashboards before the rollout starts', 'Check that the on-call rota is published',
+      'Review the open P1 and P2 tickets', 'Run the smoke suite against staging', 'Confirm the rollback artefact exists and is downloadable',
+      'Export the current error budget', 'Notify support about the maintenance window', 'Pre-warm the search index', 'Check disk alerts on the search cluster',
+      'Verify the SSO group mapping in staging', 'Confirm the status page template', 'Back up the feature flag configuration', 'Lock the dependency versions',
+      'Share the rollout plan with the release channel', 'Get the second reviewer to sign the runbook'
+    ]
+  },
+  {
+    name: 'Regression sweep',
+    items: [
+      'Billing: create, pay and refund an invoice', 'Billing: proration when the plan changes mid-cycle', 'Billing: retry policy after a declined card', 'Search: ranking for the top 50 queries',
+      'Search: empty results and typo tolerance', 'Search: filters combined with sorting', 'Onboarding: all four steps on web', 'Onboarding: cancelling on step 2 does not leave the session half-open',
+      'Onboarding: resume after logout', 'Exports: CSV with 50k rows', 'Exports: XLSX with accents and emoji in the headers', 'Exports: cancel an export in progress',
+      'Permissions: viewer cannot edit', 'Permissions: contractors see only their workspaces', 'Permissions: role change is visible after the cache expires', 'Notifications: grouped by thread',
+      'Notifications: mute a thread and verify the digest', 'Accessibility: keyboard-only pass over the main flows', 'Accessibility: contrast on the secondary button and the disabled states',
+      'Performance: p95 of the activity feed stays under 1.5s'
+    ]
+  },
+  {
+    name: 'Rollout and follow-up',
+    items: [
+      'Ramp to 5% and watch the error budget for an hour', 'Ramp to 25%', 'Ramp to 50%', 'Ramp to 100%', 'Post the status after every step', 'Attach the dashboard snapshots to this card',
+      'Disable the legacy date picker flag', 'Remove the temporary export timeout', 'Lower the retry ceiling back to 3', 'Archive the staging fixtures', 'Write the rollout summary',
+      'Schedule the retrospective', 'Update the runbook with what we learned', 'File follow-up tickets for every workaround', 'Close the P2 tickets that shipped',
+      'Notify support that the maintenance window is over', 'Delete the release branch', 'Update the changelog', 'Publish the customer-facing notes', 'Thank the people on call'
+    ]
+  }
+]
+
+const HEAVY_COMMENT_BASES = [
+  'Ramp to 25% looks clean. Error rate flat at 0.12%, p95 on the activity feed went from 1.9s to 1.4s. I am holding at 25% for the full hour as agreed and will post the dashboard snapshot here before moving on.',
+  'Heads up: the proration job overlapped with the nightly export again and the export took 41 minutes instead of the usual 12. Not a regression of this release, but we should move the export to 04:00 UTC before the next one. I opened a follow-up ticket.',
+  'Reproduced the onboarding cancel bug on Safari 17 only after navigating back from step 3. On Chrome it never happens. The session cookie is cleared but the wizard state in local storage survives, so the next visit resumes in a half-done step. Fix is a two-liner, test attached to the PR.',
+  'Search ranking diff for the top 50 queries is attached. 46 are identical, 3 improved, 1 got worse ("invoice reminder", the exact-match boost lost to a longer document). I think that one is acceptable, but I would like a second opinion from someone who owns the ranking model.',
+  'SSO group mapping: confirmed the 15 minute cache is the cause of the delayed role changes. Support should tell customers to wait or sign out and in. Documented in the runbook under "Known risks".',
+  'Accessibility pass done with keyboard only. Two findings: the secondary button on the invoice form has contrast 3.9:1 in dark mode, and the date picker traps focus on Escape. Both filed, neither blocks the release in my view.',
+  'Rollback rehearsal finished. It took 18 minutes, mostly waiting for the search index to reload. If we pre-warm the index on the old version the rehearsal should drop under 7. Adding that to the pre-flight checklist.',
+  'Exports: CSV with 50k rows is fine (38s). XLSX with emoji in the headers fails on the second sheet because of the sheet name limit. Workaround is to truncate to 31 characters, patch is in review.',
+  'Billing sandbox declined every card on Tuesday afternoon, so the retry-policy tests were inconclusive. Re-ran them this morning against the new sandbox account and all 12 scenarios pass.',
+  'Can someone confirm the contractors workspace mapping? In staging, contractors from two vendors see each other\'s workspaces. Production data looks right, but I would like to be sure before we ramp past 5%.',
+  'Dashboards snapshot before the rollout is attached to the card, together with the error budget export. Budget at 94% remaining, no burn in the last 7 days.',
+  'Created the card from the planning meeting. Scope and owners are in the description; please keep the checklists up to date as you go so the status post can be generated from them.'
+]
+
+// Real comments run long: most get one or two extra sentences, so they span roughly 180 to 600 characters.
+const HEAVY_COMMENT_TAILS = [
+  ' I attached the exact commands and the output so anyone can rerun them without asking me.',
+  ' This is the third time we see this on a Tuesday, so I suspect the cron overlap is not a coincidence and we should look at the schedule before touching the code.',
+  ' Not blocking, but please do not close this card until the follow-up ticket is linked here, otherwise we will lose the context again next quarter.',
+  ' For reference, the same scenario passed on the previous release candidate, so the regression must have come in with the dependency bump from last week.',
+  ' If you disagree with any of this, say so here and not in the chat thread, because the thread is not archived and the next release captain will not find it.',
+  ' Dashboards, logs and the raw export are in the shared folder linked from the description; the folder is read-only for everyone except the release captain.'
+]
+
+const HEAVY_COMMENTS = HEAVY_COMMENT_BASES.map((base, i) => (i % 4 === 3 ? base : `${base}${HEAVY_COMMENT_TAILS[i % 6]}${i % 4 === 2 ? HEAVY_COMMENT_TAILS[(i + 1) % 6] : ''}`))
+
+export function applyHeavyFixture(backend, { firstLane = 80, now = Date.now() } = {}) {
+  const { state } = backend
+  const iso = offsetMs => new Date(now + offsetMs).toISOString()
+  const B1 = backend.ids.B1
+  const rand = mulberry32(20261026)
+  const pick = list => list[Math.floor(rand() * list.length)]
+
+  const members = [
+    { id: oid(21), username: 'ada', full_name: 'Ada Demo', initials: 'AD', avatar_url: null },
+    { id: oid(22), username: 'lin', full_name: 'Lin Demo', initials: 'LD', avatar_url: null },
+    { id: oid(23), username: 'sam', full_name: 'Sam Demo', initials: 'SD', avatar_url: null },
+    { id: oid(24), username: 'kai', full_name: 'Kai Demo', initials: 'KD', avatar_url: null },
+    { id: oid(25), username: 'noor', full_name: 'Noor Demo', initials: 'ND', avatar_url: null },
+    { id: oid(26), username: 'tom', full_name: 'Tom Demo', initials: 'TD', avatar_url: null }
+  ]
+
+  // the last two board labels are unnamed colours, rendered as bars; one name is deliberately long
+  const labels = [
+    { id: oid(31), name: 'bug', color: 'red' },
+    { id: oid(32), name: 'onboarding', color: 'blue' },
+    { id: oid(33), name: 'copy', color: 'yellow' },
+    { id: oid(34), name: 'design', color: 'purple' },
+    { id: oid(35), name: 'a11y', color: 'green' },
+    { id: oid(36), name: 'perf', color: 'orange' },
+    { id: oid(37), name: 'customer-escalation-needed', color: 'pink' },
+    { id: oid(38), name: '', color: 'sky' }
+  ]
+
+  const labelText = l => l.name || l.color
+  const counts = HEAVY_LANE_COUNTS.map((n, i) => (i === 0 ? firstLane : n))
+
+  const lists = HEAVY_LANES.map((name, i) => ({ id: oid(200 + i), name, pos: i + 1, closed: false }))
+  const cards = []
+  let n = 0
+
+  lists.forEach((list, laneIndex) => {
+    for (let k = 0; k < counts[laneIndex]; k += 1) {
+      n += 1
+      const roll = rand()
+      let name
+
+      if (n % 7 === 0) {
+        name = HEAVY_SHORT[n % HEAVY_SHORT.length]
+      } else if (n % 9 === 0) {
+        name = heavyLongTitle(Math.floor(n / 9))
+      } else {
+        name = `${pick(HEAVY_TITLES)}${roll < 0.3 ? ` (${1 + Math.floor(rand() * 40)})` : ''}`
+      }
+
+      const dueRoll = rand()
+      let due = null
+      let dueComplete = false
+
+      if (dueRoll >= 0.4 && dueRoll < 0.6) {
+        due = iso(-(1 + Math.floor(rand() * 20)) * DAY)
+      } else if (dueRoll >= 0.6 && dueRoll < 0.75) {
+        due = iso((4 + Math.floor(rand() * 36)) * HOUR)
+      } else if (dueRoll >= 0.75 && dueRoll < 0.95) {
+        due = iso((3 + Math.floor(rand() * 28)) * DAY)
+      } else if (dueRoll >= 0.95) {
+        due = iso(-(1 + Math.floor(rand() * 10)) * DAY)
+        dueComplete = true
+      }
+
+      const labelCount = rand() < 0.25 ? 0 : 1 + Math.floor(rand() * 4)
+      const chosen = []
+
+      while (chosen.length < labelCount) {
+        const l = pick(labels)
+
+        if (!chosen.includes(l)) {
+          chosen.push(l)
+        }
+      }
+
+      const memberRoll = rand()
+      const memberCount = memberRoll < 0.4 ? 0 : memberRoll < 0.75 ? 1 : memberRoll < 0.93 ? 2 : 4 + Math.floor(rand() * 2)
+      const people = []
+
+      while (people.length < memberCount) {
+        const m = pick(members)
+
+        if (!people.includes(m.id)) {
+          people.push(m.id)
+        }
+      }
+      const total = rand() < 0.45 ? 0 : 2 + Math.floor(rand() * 18)
+      const short = `Hvy${String(n).padStart(5, '0')}`
+
+      cards.push({
+        id: oid(1000 + n), name, id_list: list.id, due, due_complete: dueComplete,
+        labels: chosen.map(labelText), label_ids: chosen.map(l => l.id), id_members: people,
+        short_link: short, url: `https://trello.com/c/${short}`,
+        comment_count: rand() < 0.5 ? 0 : 1 + Math.floor(rand() * 14), attachment_count: rand() < 0.6 ? 0 : 1 + Math.floor(rand() * 6),
+        checklist: { total, done: Math.floor(rand() * (total + 1)) }, last_activity: iso(-(1 + Math.floor(rand() * 200)) * HOUR)
+      })
+    }
+  })
+
+  // the heavy card: first card of "In progress". The harness' checklist routes work on oid(101), so it takes that id.
+  const inProgress = lists[4]
+  const heavy = cards.find(c => c.id_list === inProgress.id)
+  const heavyChecklists = HEAVY_CHECKLISTS.map((cl, ci) => ({
+    id: oid(300 + ci), name: cl.name,
+    items: cl.items.map((name, ii) => ({ id: oid(320 + ci * 20 + ii), name, state: (ci * 3 + ii * 7) % 5 < 2 ? 'complete' : 'incomplete' }))
+  }))
+  const heavyDone = heavyChecklists.flatMap(c => c.items).filter(i => i.state === 'complete').length
+
+  Object.assign(heavy, {
+    id: oid(101), name: 'Release 4.2 — regression sweep and rollout checklist', short_link: 'Hvy00101', url: 'https://trello.com/c/Hvy00101',
+    due: iso(-3 * DAY), due_complete: false,
+    labels: [labels[0], labels[1], labels[5], labels[6]].map(labelText), label_ids: [oid(31), oid(32), oid(36), oid(37)],
+    id_members: [members[0].id, members[1].id],
+    comment_count: HEAVY_COMMENTS.length, attachment_count: 6, checklist: { total: 60, done: heavyDone }, last_activity: iso(-25 * 60 * 1000)
+  })
+
+  const authors = ['Ada Demo', 'Lin Demo', 'Sam Demo', 'Kai Demo']
+  const attachments = [
+    { name: 'release-notes-draft.pdf', url: 'https://example.invalid/files/release-notes-draft.pdf', is_upload: true, bytes: 482113, mime: 'application/pdf' },
+    { name: 'perf-before-after.png', url: 'https://example.invalid/files/perf-before-after.png', is_upload: true, bytes: 221044, mime: 'image/png' },
+    { name: 'rollout-plan.xlsx', url: 'https://example.invalid/files/rollout-plan.xlsx', is_upload: true, bytes: 88231, mime: 'application/vnd.ms-excel' },
+    { name: 'incident-timeline-2026-09-30-search-index-outage-postmortem-draft-v3-final.md', url: 'https://example.invalid/files/timeline.md', is_upload: true, bytes: 9120, mime: 'text/markdown' },
+    { name: 'Release runbook', url: 'https://example.invalid/runbook', is_upload: false, bytes: null, mime: null },
+    { name: 'Dashboard — error budget', url: 'https://example.invalid/dashboards/error-budget', is_upload: false, bytes: null, mime: null }
+  ].map((a, i) => ({ id: oid(50 + i), ...a }))
+
+  const activityTypes = ['updateCard', 'commentCard', 'updateCheckItemStateOnCard', 'updateCheckItemStateOnCard', 'addChecklistToCard']
+  const activity = Array.from({ length: 20 }, (_, i) => ({
+    id: oid(500 + i), type: activityTypes[i % activityTypes.length], author: authors[i % authors.length], date: iso(-(i + 1) * 3 * HOUR),
+    text: ['moved from Ready to In progress', 'Ramp to 25% looks clean', 'completed Ramp to 5% and watch the error budget for an hour', 'completed Run the smoke suite against staging', 'added the checklist Rollout and follow-up'][i % 5]
+  }))
+
+  state.boards = [{ id: B1, name: 'Platform — release train', url: 'https://trello.com/b/hEaVy001', closed: false, starred: true }]
+  state.view = { board: state.boards[0], lists, cards, members, labels }
+
+  state.details = {
+    [heavy.id]: {
+      card: heavy,
+      desc: HEAVY_DESC,
+      list: { id: inProgress.id, name: inProgress.name },
+      board: { id: B1, name: state.boards[0].name },
+      checklists: heavyChecklists,
+      comments: HEAVY_COMMENTS.map((text, i) => ({ id: oid(60 + i), author: authors[i % authors.length], text, date: iso(-(i + 1) * 7 * HOUR) })),
+      attachments,
+      activity
+    }
+  }
+}
+
 
 /** A `ctx` like the one the desktop app hands to register(). */
 export function makeCtx(sdk, backend, { clipboard = true } = {}) {

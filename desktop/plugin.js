@@ -57,7 +57,7 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,29 @@ const SOON_MS = 2 * DAY_MS
 const REFRESH_CHOICES = [0, 15, 25, 60]
 const TRELLO_ADMIN_URL = 'https://trello.com/apps/admin'
 
-export const DEFAULT_SETTINGS = Object.freeze({ sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile' })
+export const DEFAULT_SETTINGS = Object.freeze({ sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile', density: 'comfortable' })
+
+/** Card densities, in the order Settings offers them. */
+export const DENSITIES = Object.freeze(['comfortable', 'compact'])
+
+/**
+ * Height (px) a card is assumed to have until it has been laid out. It feeds `contain-intrinsic-size` next to
+ * `content-visibility: auto`: cards outside the viewport are not laid out, so the scrollable height of a lane is
+ * this estimate times the skipped cards plus the measured height of the rest. Keep it near the median card.
+ */
+export const CARD_ESTIMATED_HEIGHT = Object.freeze({ comfortable: 84, compact: 56 })
+
+/** Vertical padding + border of a card (px). `contain-intrinsic-size` is the CONTENT box, so this is subtracted. */
+export const CARD_CHROME_HEIGHT = Object.freeze({ comfortable: 18, compact: 14 })
+
+export const cardEstimatedHeight = density => CARD_ESTIMATED_HEIGHT[density] || CARD_ESTIMATED_HEIGHT.comfortable
+
+/** The `contain-intrinsic-size` value that makes a skipped card as tall as its estimated height. */
+export const cardIntrinsicSize = density => `auto ${cardEstimatedHeight(density) - (CARD_CHROME_HEIGHT[density] || CARD_CHROME_HEIGHT.comfortable)}px`
+
+/** A card shows this many labels and this many avatars; the rest collapses into a `+N` chip. */
+export const MAX_CARD_LABELS = 3
+export const MAX_CARD_AVATARS = 3
 
 const EN = {
   pane: { title: 'Trello' },
@@ -197,6 +219,9 @@ const EN = {
     sendInsert: 'Insert',
     sendSubmit: 'Send',
     sendModeHint: 'Insert leaves the card in the composer so you can add an instruction.',
+    density: 'Card density',
+    densityComfortable: 'Comfortable',
+    densityCompact: 'Compact',
     refresh: 'Refresh every',
     refreshOff: 'Off',
     refreshSeconds: n => `${n}s`,
@@ -358,6 +383,9 @@ const ES = {
     sendInsert: 'Insertar',
     sendSubmit: 'Enviar',
     sendModeHint: 'Insertar deja la card en el compositor para que añadas una instrucción.',
+    density: 'Densidad de las cards',
+    densityComfortable: 'Cómoda',
+    densityCompact: 'Compacta',
     refresh: 'Actualizar cada',
     refreshOff: 'Nunca',
     refreshSeconds: n => `${n}s`,
@@ -625,7 +653,8 @@ export function normalizeSettings(raw) {
     refreshSec: REFRESH_CHOICES.includes(refresh) ? refresh : DEFAULT_SETTINGS.refreshSec,
     defaultBoard: typeof r.defaultBoard === 'string' && r.defaultBoard ? r.defaultBoard : null,
     // Where the next Connect / Disconnect acts. A stored choice is kept as is; the default is this profile.
-    credentialScope: r.credentialScope === 'app' ? 'app' : 'profile'
+    credentialScope: r.credentialScope === 'app' ? 'app' : 'profile',
+    density: r.density === 'compact' ? 'compact' : 'comfortable'
   }
 }
 
@@ -747,6 +776,38 @@ export function stepSelection(ids, current, delta) {
   }
 
   return ids[Math.max(0, Math.min(ids.length - 1, at + delta))]
+}
+
+/**
+ * Where `h` / `l` go: the first card of the previous / next lane that has cards. `fromListId` is the lane the
+ * selection (columns) or the active list (list mode) is in; without one, `l` lands on the first lane and `h` on
+ * the last. Returns null when there is no lane in that direction.
+ */
+export function laneJumpTarget(view, fromListId, delta) {
+  const grouped = cardsByList(view)
+  const lanes = (view?.lists || []).filter(l => (grouped.get(l.id) || []).length > 0)
+
+  if (!lanes.length) {
+    return null
+  }
+
+  const at = lanes.findIndex(l => l.id === fromListId)
+  let next = null
+
+  if (at < 0) {
+    // not in a lane with cards: step from the position the lane would have among all lanes
+    const all = (view.lists || []).findIndex(l => l.id === fromListId)
+
+    if (all < 0) {
+      next = delta >= 0 ? lanes[0] : lanes[lanes.length - 1]
+    } else {
+      next = delta >= 0 ? (view.lists.slice(all + 1).find(l => (grouped.get(l.id) || []).length > 0) || null) : ([...view.lists.slice(0, all)].reverse().find(l => (grouped.get(l.id) || []).length > 0) || null)
+    }
+  } else {
+    next = lanes[at + (delta >= 0 ? 1 : -1)] || null
+  }
+
+  return next ? { listId: next.id, cardId: grouped.get(next.id)[0].id } : null
 }
 
 const TRELLO_COLOR_RE = /^(green|yellow|orange|red|purple|blue|sky|lime|pink|black)(_light|_dark)?$/
@@ -1519,7 +1580,8 @@ function renderInline(nodes, prefix) {
 }
 
 /** Safe markdown subset rendered as React elements: never an HTML string. */
-function Markdown({ text }) {
+/** Memoized by text: a re-render of the drawer must not parse the description and every comment again. */
+const Markdown = memo(function Markdown({ text }) {
   const blocks = parseMarkdown(text)
 
   return h(
@@ -1552,7 +1614,7 @@ function Markdown({ text }) {
       return h('div', { key: i, style: { whiteSpace: 'pre-wrap' } }, ...renderInline(parseInline(b.text), `p${i}.`))
     })
   )
-}
+})
 
 // -- small pieces -----------------------------------------------------------
 
@@ -1564,31 +1626,52 @@ function IconButton({ icon, label, onClick, disabled, spinning, children }) {
   )
 }
 
-function LabelMark({ text, boardLabels }) {
+function LabelMark({ text, boardLabels, bar = false, maxWidth = '8rem' }) {
   const info = resolveLabel(text, boardLabels)
 
-  if (info.text === null) {
-    return h('span', { 'data-trello': 'label-bar', title: text, style: { display: 'inline-block', width: '2.125rem', height: '0.375rem', borderRadius: '3px', background: `var(${info.cssVar})` } })
+  if (info.text === null || bar) {
+    return h('span', { 'data-trello': 'label-bar', title: info.text === null ? text : info.text, style: { display: 'inline-block', flexShrink: 0, width: bar ? '1.5rem' : '2.125rem', height: bar ? '0.25rem' : '0.375rem', borderRadius: '3px', background: `var(${info.cssVar})` } })
   }
 
-  return h('span', { 'data-trello': 'label-chip', style: st(SMALL, { display: 'inline-block', maxWidth: '8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderRadius: '3px', padding: '0 0.375rem', background: mix(info.cssVar, 24), color: 'var(--ui-text-primary)' }) }, info.text)
+  // flex-shrink lets three chips share one line of a narrow lane; every chip carries its full text in `title`
+  return h('span', { 'data-trello': 'label-chip', title: info.text, style: st(SMALL, { display: 'inline-block', flex: '0 1 auto', minWidth: 0, maxWidth, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderRadius: '3px', padding: '0 0.375rem', background: mix(info.cssVar, 24), color: 'var(--ui-text-primary)' }) }, info.text)
 }
 
-function Avatars({ ids, members }) {
-  const people = ids.map(id => members.find(m => m.id === id)).filter(Boolean).slice(0, 3)
-
-  if (!people.length) {
-    return null
-  }
+/** A card's labels on one line: up to MAX_CARD_LABELS, then a `+N` chip whose `title` names the rest. */
+function CardLabels({ labels, boardLabels, compact }) {
+  const shown = labels.slice(0, MAX_CARD_LABELS)
+  const hidden = labels.slice(MAX_CARD_LABELS)
 
   return h(
     'span',
-    { style: st(ROW, { marginLeft: 'auto', gap: '0.125rem' }) },
-    ...people.map(p => h('span', { key: p.id, title: p.full_name || p.username, style: { width: '1.125rem', height: '1.125rem', borderRadius: '50%', display: 'grid', placeItems: 'center', fontSize: '0.5625rem', border: HAIRLINE, color: 'var(--ui-text-tertiary)' } }, p.initials || '?'))
+    { 'data-trello': 'labels', style: st(ROW, { gap: '0.25rem', flexWrap: 'nowrap', overflow: 'hidden' }) },
+    ...shown.map((l, i) => h(LabelMark, { key: `${l}${i}`, text: l, boardLabels, bar: compact, maxWidth: '5rem' })),
+    hidden.length > 0 && h('span', { 'data-trello': 'label-more', title: hidden.map(l => resolveLabel(l, boardLabels).key).join(', '), style: st(SMALL, MUTED, { flexShrink: 0, whiteSpace: 'nowrap' }, compact ? { fontSize: '0.625rem', lineHeight: '0.625rem' } : null) }, `+${hidden.length}`)
   )
 }
 
-function DueChip({ card }) {
+/** Up to MAX_CARD_AVATARS people, then a `+N` chip whose `title` names the rest. Nobody is dropped silently. */
+function Avatars({ ids, members, compact = false }) {
+  const people = ids.map(id => members.find(m => m.id === id)).filter(Boolean)
+  const shown = people.slice(0, MAX_CARD_AVATARS)
+  const hiddenCount = ids.length - shown.length
+
+  if (!shown.length && !hiddenCount) {
+    return null
+  }
+
+  const hiddenNames = people.slice(MAX_CARD_AVATARS).map(p => p.full_name || p.username)
+  const size = compact ? '1rem' : '1.125rem'
+
+  return h(
+    'span',
+    { 'data-trello': 'avatars', style: st(ROW, { marginLeft: 'auto', gap: '0.125rem', flexShrink: 0 }) },
+    ...shown.map(p => h('span', { key: p.id, title: p.full_name || p.username, style: { width: size, height: size, borderRadius: '50%', display: 'grid', placeItems: 'center', fontSize: compact ? '0.5rem' : '0.5625rem', border: HAIRLINE, color: 'var(--ui-text-tertiary)' } }, p.initials || '?')),
+    hiddenCount > 0 && h('span', { 'data-trello': 'avatars-more', title: hiddenNames.length ? hiddenNames.join(', ') : String(hiddenCount), style: st({ height: size, minWidth: size, borderRadius: '999px', display: 'grid', placeItems: 'center', fontSize: compact ? '0.5rem' : '0.5625rem', padding: '0 0.25rem', border: HAIRLINE, color: 'var(--ui-text-tertiary)' }) }, `+${hiddenCount}`)
+  )
+}
+
+function DueChip({ card, compact = false }) {
   const t = usePluginI18n(ID)
   const info = dueInfo(card.due, card.due_complete)
 
@@ -1599,24 +1682,25 @@ function DueChip({ card }) {
   const cssVar = DUE_VARS[info.kind]
   const title = info.kind === 'overdue' ? t('card.overdue') : info.kind === 'soon' ? t('card.dueSoon') : info.kind === 'done' ? t('card.dueDone') : ''
 
-  return h('span', { 'data-trello': `due-${info.kind}`, title, style: st(SMALL, { border: `1px solid var(${cssVar})`, color: `var(${cssVar})`, borderRadius: '4px', padding: '0 0.3125rem', textDecoration: info.kind === 'done' ? 'line-through' : 'none', whiteSpace: 'nowrap', flexShrink: 0 }) }, formatDate(card.due))
+  return h('span', { 'data-trello': `due-${info.kind}`, title, style: st(SMALL, { border: `1px solid var(${cssVar})`, color: `var(${cssVar})`, borderRadius: '4px', padding: '0 0.3125rem', lineHeight: compact ? '0.875rem' : undefined, textDecoration: info.kind === 'done' ? 'line-through' : 'none', whiteSpace: 'nowrap', flexShrink: 0 }) }, formatDate(card.due))
 }
 
-function CardMeta({ card, view }) {
+/** Due date, checklist, comments and attachments on one row with the avatars (wraps only when it cannot fit). */
+function CardMeta({ card, members, compact }) {
   const { total, done } = card.checklist
 
   return h(
     'div',
-    { style: st(ROW, MUTED, SMALL, { gap: '0.625rem' }) },
-    h(DueChip, { card }),
+    { style: st({ display: 'flex', alignItems: 'center', minWidth: 0 }, MUTED, SMALL, { columnGap: compact ? '0.5rem' : '0.625rem', rowGap: 0, flexWrap: 'wrap' }) },
+    h(DueChip, { card, compact }),
     total > 0 && h('span', { 'data-trello': 'checklist', style: { fontVariantNumeric: 'tabular-nums' } }, `☑ ${done}/${total}`),
     card.comment_count > 0 && h('span', { 'data-trello': 'comments' }, `💬 ${card.comment_count}`),
     card.attachment_count > 0 && h('span', { 'data-trello': 'attachments' }, `📎 ${card.attachment_count}`),
-    h(Avatars, { ids: card.id_members, members: view.members })
+    h(Avatars, { ids: card.id_members, members, compact })
   )
 }
 
-function MoveMenu({ view, card, actions, children }) {
+function MoveMenu({ lists, card, onMove, children }) {
   const t = usePluginI18n(ID)
 
   return h(
@@ -1626,21 +1710,43 @@ function MoveMenu({ view, card, actions, children }) {
     h(
       DropdownMenuContent,
       { align: 'end' },
-      ...view.lists
+      ...lists
         .filter(l => l.id !== card.id_list)
-        .map(l => h(DropdownMenuItem, { key: l.id, onSelect: () => actions.move.mutate({ cardId: card.id, listId: l.id }) }, `${t('card.moveTo')}: ${l.name}`))
+        .map(l => h(DropdownMenuItem, { key: l.id, onSelect: () => onMove(card.id, l.id) }, `${t('card.moveTo')}: ${l.name}`))
     )
   )
 }
 
 // -- card row ---------------------------------------------------------------
 
-function CardRow({ card, view, actions }) {
+/** The latest value in a ref, so callbacks built once can still reach fresh mutation objects. */
+function useLatest(value) {
+  const ref = useRef(value)
+  ref.current = value
+
+  return ref
+}
+
+/** One boolean per card: when the selection moves, only the two cards whose answer flips render. */
+function useIsSelected(cardId) {
+  const selectedAtom = RT.store.selected
+  const subscribe = useCallback(onChange => selectedAtom.listen(() => onChange()), [selectedAtom])
+
+  return useSyncExternalStore(subscribe, () => selectedAtom.get() === cardId, () => false)
+}
+
+/**
+ * One card. Memoized: it takes the card and only the pieces it draws (board labels, members, lists for the move
+ * menu, density, a stable move callback), so a poll that changes nothing, or a selection that moves elsewhere,
+ * renders nothing here. The cached board view is shared structurally, so a card whose data changed arrives as a
+ * new object and one that did not arrives as the same object.
+ */
+const CardRow = memo(function CardRow({ card, boardLabels, members, lists, density, onMove }) {
   const t = usePluginI18n(ID)
-  const selectedId = useValue(RT.store.selected)
+  const selected = useIsSelected(card.id)
   const [hot, setHot] = useState(false)
   const ref = useRef(null)
-  const selected = selectedId === card.id
+  const compact = density === 'compact'
 
   useEffect(() => {
     if (selected && ref.current && typeof ref.current.scrollIntoView === 'function') {
@@ -1664,34 +1770,47 @@ function CardRow({ card, view, actions }) {
       ref,
       'data-trello': 'card',
       'data-card-id': card.id,
+      'data-density': compact ? 'compact' : 'comfortable',
       'data-selected': selected ? 'true' : 'false',
       onMouseEnter: () => setHot(true),
       onMouseLeave: () => setHot(false),
-      style: st(FILL, { flexShrink: 0, gap: '0.375rem', border: `1px solid ${selected ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'}`, borderRadius: '8px', padding: '0.5rem 0.625rem', background: selected ? mix('--ui-accent', 8) : 'var(--ui-bg-tertiary)' })
+      style: st(FILL, {
+        position: 'relative',
+        flexShrink: 0,
+        gap: compact ? '0.125rem' : '0.375rem',
+        border: `1px solid ${selected ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'}`,
+        borderRadius: compact ? '6px' : '8px',
+        padding: compact ? '0.375rem' : '0.5rem 0.625rem',
+        background: selected ? mix('--ui-accent', 8) : 'var(--ui-bg-tertiary)',
+        // cards outside the viewport are not laid out; until they are, they take the estimated height
+        contentVisibility: 'auto',
+        containIntrinsicSize: cardIntrinsicSize(density)
+      })
     },
     h(
       'button',
-      { type: 'button', onClick: open, 'data-trello': 'card-open', style: st(FILL, { gap: '0.375rem', textAlign: 'left', background: 'transparent', border: 0, padding: 0, color: 'inherit', cursor: 'pointer', font: 'inherit' }) },
-      h('span', { style: { fontWeight: 500, fontSize: '0.8125rem', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere' } }, card.name),
-      card.labels.length > 0 && h('span', { style: st(ROW, { flexWrap: 'wrap', gap: '0.25rem' }) }, ...card.labels.map((l, i) => h(LabelMark, { key: `${l}${i}`, text: l, boardLabels: view.labels }))),
-      h(CardMeta, { card, view })
+      { type: 'button', onClick: open, 'data-trello': 'card-open', style: st(FILL, { gap: compact ? '0.125rem' : '0.375rem', textAlign: 'left', background: 'transparent', border: 0, padding: 0, color: 'inherit', cursor: 'pointer', font: 'inherit' }) },
+      h('span', { title: card.name, style: { fontWeight: 500, fontSize: '0.8125rem', lineHeight: compact ? '1.125rem' : undefined, display: '-webkit-box', WebkitLineClamp: compact ? 1 : 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere' } }, card.name),
+      card.labels.length > 0 && h(CardLabels, { labels: card.labels, boardLabels, compact }),
+      h(CardMeta, { card, members, compact })
     ),
+    // an overlay, not a row: showing it never changes the card's height, so nothing below it moves
     (hot || selected) &&
       h(
         'div',
-        { style: st(ROW, { gap: '0.25rem' }) },
+        { 'data-trello': 'card-actions', style: st(ROW, { position: 'absolute', top: '0.25rem', right: '0.25rem', zIndex: 1, gap: '0.25rem', padding: '0.125rem', borderRadius: '6px', border: HAIRLINE, background: 'var(--ui-bg-elevated)' }) },
         h(Tip, { label: t('card.sendHint') }, h(Button, { 'data-trello': 'send', onClick: send, size: 'xs', type: 'button', variant: 'secondary' }, h(Codicon, { name: 'send' }), t('card.sendToAgent'))),
         h(IconButton, { icon: 'link-external', label: t('common.openInTrello'), onClick: () => card.url && openLink(card.url) }),
         h(
           MoveMenu,
-          { view, card, actions },
+          { lists, card, onMove },
           h(Button, { 'aria-label': t('card.menu'), size: 'icon-xs', type: 'button', variant: 'ghost' }, h(Codicon, { name: 'ellipsis' }))
         )
       )
   )
-}
+})
 
-function AddCard({ listId, actions }) {
+function AddCard({ listId, onCreate }) {
   const t = usePluginI18n(ID)
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
@@ -1704,7 +1823,7 @@ function AddCard({ listId, actions }) {
     const title = name.trim()
 
     if (title) {
-      actions.createCard.mutate({ listId, name: title })
+      onCreate(listId, title)
       setName('')
       setOpen(false)
     }
@@ -1720,36 +1839,77 @@ function AddCard({ listId, actions }) {
 
 // -- board layouts ----------------------------------------------------------
 
-function ListFocus({ view, actions }) {
+/**
+ * One row of lane chips (name + card count), shared by both layouts. In list mode it is a tab list: the active
+ * chip is the list shown. In columns mode it is a group of jump buttons: the highlighted chips are the lanes that
+ * are on screen. The highlighted chip is kept inside the strip's own horizontal scroll.
+ */
+function LaneStrip({ lists, grouped, mode, activeIds, onPick }) {
+  const t = usePluginI18n(ID)
+  const ref = useRef(null)
+  const asTabs = mode === 'list'
+  const activeKey = lists.filter(l => activeIds.has(l.id)).map(l => l.id).join(',')
+
+  useEffect(() => {
+    const strip = ref.current
+    const chip = strip && strip.querySelector('[data-active="true"]')
+
+    if (!chip) {
+      return
+    }
+
+    const c = chip.getBoundingClientRect()
+    const s = strip.getBoundingClientRect()
+
+    if (c.left < s.left) {
+      strip.scrollLeft -= s.left - c.left + 8
+    } else if (c.right > s.right) {
+      strip.scrollLeft += c.right - s.right + 8
+    }
+  }, [activeKey])
+
+  return h(
+    'div',
+    { ref, 'aria-label': t('board.lists'), 'data-mode': mode, 'data-trello': 'lane-strip', role: asTabs ? 'tablist' : 'group', style: st(ROW, { gap: '0.375rem', padding: '0.5rem 0.75rem', overflowX: 'auto', borderBottom: HAIRLINE, flexShrink: 0 }) },
+    ...lists.map(l => {
+      const on = activeIds.has(l.id)
+
+      return h(
+        'button',
+        {
+          key: l.id,
+          ...(asTabs ? { 'aria-selected': on, role: 'tab' } : { 'aria-current': on ? 'true' : undefined }),
+          'data-active': on ? 'true' : 'false',
+          'data-lane-id': l.id,
+          'data-trello': 'chip',
+          onClick: () => onPick(l.id),
+          type: 'button',
+          style: st({ whiteSpace: 'nowrap', cursor: 'pointer', font: 'inherit', fontSize: '0.75rem', borderRadius: '999px', padding: '0.125rem 0.625rem', color: on ? 'var(--ui-text-primary)' : 'var(--ui-text-tertiary)', border: `1px solid ${on ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'}`, background: on ? mix('--ui-accent', 15) : 'transparent' })
+        },
+        l.name,
+        h('b', { style: { marginLeft: '0.25rem', opacity: 0.75, fontWeight: 600 } }, (grouped.get(l.id) || []).length)
+      )
+    })
+  )
+}
+
+function ListFocus({ view, grouped, density, boardActions }) {
   const t = usePluginI18n(ID)
   const listId = useValue(RT.store.listId)
-  const grouped = cardsByList(view)
   const active = grouped.has(listId) ? listId : view.lists[0].id
   const cards = grouped.get(active) || []
+  const activeIds = useMemo(() => new Set([active]), [active])
 
   return h(
     'div',
     { 'data-trello': 'list-focus', style: st(FILL, { flex: 1 }) },
-    h(
-      'div',
-      { 'aria-label': t('board.lists'), role: 'tablist', style: st(ROW, { gap: '0.375rem', padding: '0.5rem 0.75rem', overflowX: 'auto', borderBottom: HAIRLINE, flexShrink: 0 }) },
-      ...view.lists.map(l => {
-        const on = l.id === active
-
-        return h(
-          'button',
-          { key: l.id, 'aria-selected': on, 'data-trello': 'chip', onClick: () => RT.store.listId.set(l.id), role: 'tab', type: 'button', style: st({ whiteSpace: 'nowrap', cursor: 'pointer', font: 'inherit', fontSize: '0.75rem', borderRadius: '999px', padding: '0.125rem 0.625rem', color: on ? 'var(--ui-text-primary)' : 'var(--ui-text-tertiary)', border: `1px solid ${on ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'}`, background: on ? mix('--ui-accent', 15) : 'transparent' }) },
-          l.name,
-          h('b', { style: { marginLeft: '0.25rem', opacity: 0.75, fontWeight: 600 } }, (grouped.get(l.id) || []).length)
-        )
-      })
-    ),
+    h(LaneStrip, { activeIds, grouped, lists: view.lists, mode: 'list', onPick: id => RT.store.listId.set(id) }),
     h(
       'div',
       { style: st(FILL, { flex: 1, overflowY: 'auto', padding: '0.625rem 0.75rem', gap: '0.4375rem' }) },
       cards.length === 0 && h(EmptyState, { description: t('board.emptyList'), title: view.lists.find(l => l.id === active).name }),
-      ...cards.map(c => h(CardRow, { key: c.id, card: c, view, actions })),
-      h(AddCard, { key: `add-${active}`, listId: active, actions })
+      ...cards.map(c => h(CardRow, { key: c.id, boardLabels: view.labels, card: c, density, lists: view.lists, members: view.members, onMove: boardActions.move })),
+      h(AddCard, { key: `add-${active}`, listId: active, onCreate: boardActions.create })
     )
   )
 }
@@ -1795,24 +1955,100 @@ function useWheelScrollX(ref) {
   return ref
 }
 
-function Columns({ view, actions, width }) {
-  const grouped = cardsByList(view)
+/** Scroll the board sideways so `lane` starts at the left edge (the lane list has 0.75rem of padding). */
+export function scrollLaneIntoView(scroller, lane) {
+  if (!scroller || !lane) {
+    return
+  }
+
+  const left = Math.max(0, lane.getBoundingClientRect().left - scroller.getBoundingClientRect().left + scroller.scrollLeft - 12)
+
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ left })
+  } else {
+    scroller.scrollLeft = left
+  }
+}
+
+/** A lane is "on screen" for the strip when at least half of it is inside the board's scroll area. */
+const LANE_VISIBLE_RATIO = 0.5
+
+const sameSet = (a, b) => a.size === b.size && [...a].every(x => b.has(x))
+
+/** One lane: header with the card count, and its own vertical scroll. Memoized, so highlighting a lane is free. */
+const Lane = memo(function Lane({ list, cards, width, boardLabels, members, lists, density, boardActions }) {
+  return h(
+    'section',
+    { 'data-lane-id': list.id, 'data-trello': 'lane', 'data-lane-width': width, style: st(FILL, { flex: '0 0 auto', width: `${width}px`, border: HAIRLINE, borderRadius: '9px', background: mix('--ui-text-primary', 4) }) },
+    h('header', { style: st(ROW, { justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 1, padding: '0.5rem 0.625rem', fontSize: '0.75rem', background: 'var(--ui-bg-elevated)', borderBottom: HAIRLINE, borderRadius: '9px 9px 0 0' }) }, h('b', { className: 'truncate', style: { fontWeight: 600 } }, list.name), h('span', { style: st(MUTED, { fontVariantNumeric: 'tabular-nums' }) }, cards.length)),
+    h(
+      'div',
+      { 'data-trello': 'lane-body', style: st(FILL, { flex: 1, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', padding: '0.5rem', gap: density === 'compact' ? '0.25rem' : '0.4375rem' }) },
+      ...cards.map(c => h(CardRow, { key: c.id, boardLabels, card: c, density, lists, members, onMove: boardActions.move })),
+      h(AddCard, { listId: list.id, onCreate: boardActions.create })
+    )
+  )
+})
+
+function Columns({ view, grouped, width, density, boardActions }) {
   const w = laneWidth(width, view.lists.length)
   const scrollRef = useWheelScrollX(useRef(null))
+  const [onScreen, setOnScreen] = useState(() => new Set())
+  const laneKey = view.lists.map(l => l.id).join(',')
+
+  // The strip highlights the lanes that are on screen. Without IntersectionObserver the last jump is highlighted.
+  useEffect(() => {
+    const root = scrollRef.current
+
+    if (!root || typeof IntersectionObserver === 'undefined') {
+      return undefined
+    }
+
+    const ratios = new Map()
+
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const entry of entries) {
+          ratios.set(entry.target.dataset.laneId, entry.intersectionRatio)
+        }
+
+        const next = new Set([...ratios].filter(([, ratio]) => ratio >= LANE_VISIBLE_RATIO).map(([id]) => id))
+
+        if (!next.size) {
+          const best = [...ratios].filter(([, ratio]) => ratio > 0).sort((a, b) => b[1] - a[1])[0]
+
+          if (best) {
+            next.add(best[0])
+          }
+        }
+
+        setOnScreen(prev => (sameSet(prev, next) ? prev : next))
+      },
+      { root, threshold: [0, 0.25, LANE_VISIBLE_RATIO, 0.75, 1] }
+    )
+
+    root.querySelectorAll('[data-trello="lane"]').forEach(lane => observer.observe(lane))
+
+    return () => observer.disconnect()
+  }, [laneKey, scrollRef])
+
+  const jump = id => {
+    const root = scrollRef.current
+    const lane = root && [...root.querySelectorAll('[data-trello="lane"]')].find(l => l.dataset.laneId === id)
+
+    scrollLaneIntoView(root, lane)
+    setOnScreen(new Set([id]))
+  }
 
   return h(
     'div',
-    { 'data-trello': 'columns', ref: scrollRef, style: st({ flex: 1, minHeight: 0, display: 'flex', gap: '0.625rem', padding: '0.75rem', overflowX: 'auto', overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', alignItems: 'stretch' }) },
-    ...view.lists.map(l => {
-      const cards = grouped.get(l.id) || []
-
-      return h(
-        'section',
-        { key: l.id, 'data-trello': 'lane', 'data-lane-width': w, style: st(FILL, { flex: '0 0 auto', width: `${w}px`, border: HAIRLINE, borderRadius: '9px', background: mix('--ui-text-primary', 4) }) },
-        h('header', { style: st(ROW, { justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 1, padding: '0.5rem 0.625rem', fontSize: '0.75rem', background: 'var(--ui-bg-elevated)', borderBottom: HAIRLINE, borderRadius: '9px 9px 0 0' }) }, h('b', { className: 'truncate', style: { fontWeight: 600 } }, l.name), h('span', { style: st(MUTED, { fontVariantNumeric: 'tabular-nums' }) }, cards.length)),
-        h('div', { 'data-trello': 'lane-body', style: st(FILL, { flex: 1, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', padding: '0.5rem', gap: '0.4375rem' }) }, ...cards.map(c => h(CardRow, { key: c.id, card: c, view, actions })), h(AddCard, { listId: l.id, actions }))
-      )
-    })
+    { style: st(FILL, { flex: 1 }) },
+    h(LaneStrip, { activeIds: onScreen, grouped, lists: view.lists, mode: 'columns', onPick: jump }),
+    h(
+      'div',
+      { 'data-trello': 'columns', ref: scrollRef, style: st({ flex: 1, minHeight: 0, display: 'flex', gap: '0.625rem', padding: '0.75rem', overflowX: 'auto', overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', alignItems: 'stretch' }) },
+      ...view.lists.map(l => h(Lane, { key: l.id, boardActions, boardLabels: view.labels, cards: grouped.get(l.id) || [], density, list: l, lists: view.lists, members: view.members, width: w }))
+    )
   )
 }
 
@@ -1842,12 +2078,14 @@ function BodySkeleton() {
   return h('div', { 'data-trello': 'skeleton', style: st(FILL, { gap: '0.5rem', padding: '0.75rem' }) }, ...[0, 1, 2, 3].map(i => h(Skeleton, { key: i, style: { height: '3.5rem', borderRadius: '8px' } })))
 }
 
-function BoardBody({ boardId, mode, width, actions }) {
+/** Memoized: it re-renders when the board view, the layout or the density change, not for anything else. */
+const BoardBody = memo(function BoardBody({ boardId, mode, width, boardActions }) {
   const t = usePluginI18n(ID)
   const q = useBoardView(boardId)
   const view = q.data
   const listId = useValue(RT.store.listId)
-  const grouped = cardsByList(view)
+  const density = useValue(RT.store.settings).density
+  const grouped = useMemo(() => cardsByList(view), [view])
   const active = grouped.has(listId) ? listId : view?.lists?.[0]?.id || null
 
   useEffect(() => {
@@ -1868,9 +2106,9 @@ function BoardBody({ boardId, mode, width, actions }) {
     'div',
     { style: st(FILL, { flex: 1 }) },
     parsed && (parsed.code === 'rate_limited' ? h(Strip, { icon: 'clock' }, t('status.rateLimited')) : h(Strip, { icon: 'warning' }, h('span', { 'data-trello': 'stale' }, t('status.stale')), h(Button, { onClick: () => q.refetch(), size: 'xs', type: 'button', variant: 'text' }, t('common.retry')))),
-    view.lists.length === 0 ? h(EmptyState, { description: t('board.emptyBoard'), title: view.board.name }) : mode === 'columns' ? h(Columns, { view, actions, width }) : h(ListFocus, { view, actions })
+    view.lists.length === 0 ? h(EmptyState, { description: t('board.emptyBoard'), title: view.board.name }) : mode === 'columns' ? h(Columns, { boardActions, density, grouped, view, width }) : h(ListFocus, { boardActions, density, grouped, view })
   )
-}
+})
 
 // -- header: board picker + settings ---------------------------------------
 
@@ -1992,6 +2230,7 @@ function SettingsPanel({ boards, member, onAction }) {
     h('div', { style: { fontWeight: 600 } }, t('settings.title')),
     member && h('div', { style: st(MUTED, SMALL) }, t('settings.connectedAs', member.username)),
     h('div', { style: st(FILL, { gap: '0.25rem' }) }, h('span', { style: SMALL }, t('settings.sendMode')), h(SegmentedControl, { onChange: id => setSettings({ sendMode: id }), options: [{ id: 'insert', label: t('settings.sendInsert') }, { id: 'submit', label: t('settings.sendSubmit') }], value: settings.sendMode }), h('span', { style: st(MUTED, SMALL) }, t('settings.sendModeHint'))),
+    h('div', { 'data-trello': 'density-setting', style: st(FILL, { gap: '0.25rem' }) }, h('span', { style: SMALL }, t('settings.density')), h(SegmentedControl, { onChange: id => setSettings({ density: id }), options: [{ id: 'comfortable', label: t('settings.densityComfortable') }, { id: 'compact', label: t('settings.densityCompact') }], value: settings.density })),
     h('div', { style: st(FILL, { gap: '0.25rem' }) }, h('span', { style: SMALL }, t('settings.refresh')), h(SegmentedControl, { onChange: id => setSettings({ refreshSec: Number(id) }), options: REFRESH_CHOICES.map(n => ({ id: String(n), label: n === 0 ? t('settings.refreshOff') : t('settings.refreshSeconds', n) })), value: String(settings.refreshSec) })),
     h(
       'div',
@@ -2101,7 +2340,15 @@ function CredentialDialogs({ dialog, onClose }) {
   )
 }
 
-function Header({ boards, boardId, member, fetching, onRefresh }) {
+/** The only reader of `isFetching`: a poll starting or ending re-renders this button, not the board. */
+function RefreshButton({ boardId, onRefresh }) {
+  const t = usePluginI18n(ID)
+  const fetching = useBoardView(boardId).isFetching
+
+  return h(IconButton, { icon: 'refresh', label: t('common.refresh'), onClick: onRefresh, spinning: fetching })
+}
+
+function Header({ boards, boardId, member, onRefresh }) {
   const t = usePluginI18n(ID)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [dialog, setDialog] = useState(null)
@@ -2117,7 +2364,7 @@ function Header({ boards, boardId, member, fetching, onRefresh }) {
     { style: st(ROW, { padding: '0.375rem 0.5rem', borderBottom: HAIRLINE, flexShrink: 0 }) },
     h(BoardPicker, { boards, boardId }),
     h('span', { style: { flex: 1 } }),
-    h(IconButton, { icon: 'refresh', label: t('common.refresh'), onClick: onRefresh, spinning: fetching }),
+    h(RefreshButton, { boardId, onRefresh }),
     h(
       Popover,
       { onOpenChange: setSettingsOpen, open: settingsOpen },
@@ -2154,7 +2401,8 @@ function InlineAdd({ label, placeholder, onSubmit, busy }) {
   )
 }
 
-function ItemRow({ cardId, checklist, item, actions }) {
+/** Memoized: ticking one item renders that item, not the other 59. `itemActions` is built once per checklist section. */
+const ItemRow = memo(function ItemRow({ cardId, checklistId, item, itemActions }) {
   const t = usePluginI18n(ID)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(item.name)
@@ -2165,24 +2413,35 @@ function ItemRow({ cardId, checklist, item, actions }) {
     setEditing(false)
 
     if (name && name !== item.name) {
-      actions.renameItem.mutate({ cardId, checklistId: checklist.id, itemId: item.id, name })
+      itemActions.rename(cardId, checklistId, item.id, name)
     }
   }
 
   return h(
     'div',
     { 'data-trello': 'item', 'data-state': item.state, style: st(ROW, { alignItems: 'flex-start', padding: '0.125rem 0' }) },
-    h(Checkbox, { 'aria-label': item.name, checked: done, onCheckedChange: value => actions.toggle.mutate({ cardId, checklistId: checklist.id, itemId: item.id, state: value ? 'complete' : 'incomplete' }) }),
+    h(Checkbox, { 'aria-label': item.name, checked: done, onCheckedChange: value => itemActions.toggle(cardId, checklistId, item.id, value ? 'complete' : 'incomplete') }),
     editing
       ? h(Input, { autoFocus: true, 'aria-label': t('drawer.renameItem'), onBlur: save, onChange: e => setDraft(e.target.value), onKeyDown: e => { if (isSubmitEnter(e)) save(); else if (e.key === 'Escape') { setDraft(item.name); setEditing(false) } }, value: draft })
       : h('span', { onDoubleClick: () => { setDraft(item.name); setEditing(true) }, style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere', cursor: 'text', textDecoration: done ? 'line-through' : 'none', color: done ? 'var(--ui-text-tertiary)' : 'inherit' } }, item.name),
     h(IconButton, { icon: 'edit', label: t('drawer.renameItem'), onClick: () => { setDraft(item.name); setEditing(true) } }),
-    h(IconButton, { icon: 'trash', label: t('drawer.deleteItem'), onClick: () => actions.deleteItem.mutate({ cardId, checklistId: checklist.id, itemId: item.id }) })
+    h(IconButton, { icon: 'trash', label: t('drawer.deleteItem'), onClick: () => itemActions.remove(cardId, checklistId, item.id) })
   )
-}
+})
 
 function ChecklistSection({ detail, cardId, actions }) {
   const t = usePluginI18n(ID)
+  const latest = useLatest(actions)
+
+  // built once, reaching the current mutation objects through the ref, so the item rows can be memoized
+  const itemActions = useMemo(
+    () => ({
+      toggle: (card, checklistId, itemId, state) => latest.current.toggle.mutate({ cardId: card, checklistId, itemId, state }),
+      rename: (card, checklistId, itemId, name) => latest.current.renameItem.mutate({ cardId: card, checklistId, itemId, name }),
+      remove: (card, checklistId, itemId) => latest.current.deleteItem.mutate({ cardId: card, checklistId, itemId })
+    }),
+    [latest]
+  )
 
   return h(
     'section',
@@ -2196,7 +2455,7 @@ function ChecklistSection({ detail, cardId, actions }) {
         'div',
         { key: cl.id, 'data-trello': 'checklist', style: st(FILL, { gap: '0.125rem', marginBottom: '0.625rem' }) },
         h('div', { style: st(ROW, { justifyContent: 'space-between', fontWeight: 600, fontSize: '0.75rem' }) }, h('span', null, cl.name), h('span', { style: st(MUTED, { fontVariantNumeric: 'tabular-nums' }) }, `${done}/${cl.items.length}`)),
-        ...cl.items.map(item => h(ItemRow, { key: item.id, actions, cardId, checklist: cl, item })),
+        ...cl.items.map(item => h(ItemRow, { key: item.id, cardId, checklistId: cl.id, item, itemActions })),
         h(InlineAdd, { busy: actions.addItem.isPending, label: t('drawer.addItem'), onSubmit: name => actions.addItem.mutate({ cardId, checklistId: cl.id, name }), placeholder: t('drawer.itemPlaceholder') })
       )
     }),
@@ -2374,7 +2633,7 @@ function Drawer({ cardId, view, actions }) {
         h(
           'div',
           { 'data-trello': 'drawer-controls', style: st(ROW, { flexWrap: 'wrap', gap: '0.375rem' }) },
-          h(MoveMenu, { view, card, actions }, h(Button, { 'data-trello': 'move-button', size: 'xs', type: 'button', variant: 'outline' }, list ? list.name : t('card.moveTo'), h(Codicon, { name: 'chevron-down' }))),
+          h(MoveMenu, { lists: view.lists, card, onMove: (cardId, listId) => actions.move.mutate({ cardId, listId }) }, h(Button, { 'data-trello': 'move-button', size: 'xs', type: 'button', variant: 'outline' }, list ? list.name : t('card.moveTo'), h(Codicon, { name: 'chevron-down' }))),
           h(LabelEditor, { view, card, actions }),
           h('label', { style: st(ROW, SMALL, { gap: '0.25rem' }) }, t('drawer.due'), h('input', { key: card.due || 'none', 'aria-label': t('drawer.due'), 'data-trello': 'due-input', defaultValue: dueToInput(card.due), onChange: e => actions.patch.mutate({ cardId: card.id, fields: { due: inputToDue(e.target.value) } }), style: { font: 'inherit', fontSize: '0.75rem', background: 'transparent', color: 'inherit', border: HAIRLINE, borderRadius: '4px', padding: '0 0.25rem' }, type: 'date' })),
           card.due && h(Button, { onClick: () => actions.patch.mutate({ cardId: card.id, fields: { due: null } }), size: 'xs', type: 'button', variant: 'text' }, t('drawer.clearDue'))
@@ -2486,6 +2745,14 @@ function FallbackDialog() {
   )
 }
 
+/** The open card's drawer. It reads the board view and the open-card store itself, so the workspace does not. */
+function DrawerHost({ boardId, actions }) {
+  const openId = useValue(RT.store.openCard)
+  const viewQ = useBoardView(boardId)
+
+  return openId && viewQ.data ? h(Drawer, { key: openId, actions, cardId: openId, view: viewQ.data }) : null
+}
+
 function Workspace({ health, width, mode }) {
   const t = usePluginI18n(ID)
   const qc = useQueryClient()
@@ -2494,9 +2761,17 @@ function Workspace({ health, width, mode }) {
   const boardsQ = useBoards(true)
   const boards = sortBoards(boardsQ.data)
   const boardId = resolveBoardId(boards, storedBoard, settings.defaultBoard)
-  const viewQ = useBoardView(boardId)
   const actions = useCardActions(boardId)
-  const openId = useValue(RT.store.openCard)
+  const latestActions = useLatest(actions)
+
+  // What the board needs from the mutations, as callbacks that never change identity (the cards are memoized).
+  const boardActions = useMemo(
+    () => ({
+      move: (cardId, listId) => latestActions.current.move.mutate({ cardId, listId }),
+      create: (listId, name) => latestActions.current.createCard.mutate({ listId, name })
+    }),
+    [latestActions]
+  )
 
   useEffect(() => {
     if (boardId && boardId !== storedBoard) {
@@ -2526,6 +2801,24 @@ function Workspace({ health, width, mode }) {
         store.selected.set(next)
         event.preventDefault()
       }
+    } else if (event.key === 'h' || event.key === 'l') {
+      // previous / next lane: select its first card and bring the lane into view
+      const fromList = mode === 'columns' ? card?.id_list ?? null : store.listId.get() ?? view?.lists?.[0]?.id ?? null
+      const target = view ? laneJumpTarget(view, fromList, event.key === 'l' ? 1 : -1) : null
+
+      if (target) {
+        store.selected.set(target.cardId)
+
+        if (mode === 'columns') {
+          const scroller = event.currentTarget.querySelector('[data-trello="columns"]')
+
+          scrollLaneIntoView(scroller, scroller && [...scroller.querySelectorAll('[data-trello="lane"]')].find(l => l.dataset.laneId === target.listId))
+        } else {
+          store.listId.set(target.listId)
+        }
+
+        event.preventDefault()
+      }
     } else if (event.key === 'Enter' && event.target === event.currentTarget && current) {
       store.openCard.set(current)
       event.preventDefault()
@@ -2550,15 +2843,15 @@ function Workspace({ health, width, mode }) {
   } else if (!boardId) {
     body = h(EmptyState, { description: t('board.noBoards'), title: t('board.pick') })
   } else {
-    body = h(BoardBody, { actions, boardId, mode, width })
+    body = h(BoardBody, { boardActions, boardId, mode, width })
   }
 
   return h(
     'div',
     { 'data-trello': 'workspace', onKeyDown, tabIndex: 0, style: st(FILL, { flex: 1, outline: 'none', position: 'relative' }) },
-    h(Header, { boardId, boards, fetching: viewQ.isFetching, member: health.member, onRefresh: () => qc.invalidateQueries({ queryKey: K.all }) }),
+    h(Header, { boardId, boards, member: health.member, onRefresh: () => qc.invalidateQueries({ queryKey: K.all }) }),
     body,
-    openId && viewQ.data && h(Drawer, { key: openId, actions, cardId: openId, view: viewQ.data }),
+    boardId && h(DrawerHost, { actions, boardId }),
     h(FallbackDialog, null)
   )
 }

@@ -21,7 +21,7 @@
 //                                                 looked up next to the CSS and in node_modules/@vscode/codicons
 //   --out <dir>             (default docs/screenshots)
 //   --only <name>[,<name>]  render a subset: pane-list, pane-columns, card-drawer, directive-chip, connect, stress,
-//                           heavy-columns, heavy-list, heavy-drawer, heavy-drawer-checklists
+//                           heavy-columns, heavy-compact, heavy-list, heavy-drawer, heavy-drawer-checklists
 //   --keep-html <dir>       also write the intermediate HTML pages there (debugging)
 //   --allow-missing-font    continue without the icon font (icons render as empty boxes)
 //   --measure               do not write images: measure DOM size, render counts, drawer cost and real-Chromium
@@ -112,6 +112,8 @@ const SCENES = [
   // heavy work board (UI review): 10 lanes with 80 cards in the first, and a card with a very long drawer
   { name: 'heavy-columns', width: 1280, height: 720 },
   { name: 'heavy-list', width: 480, height: 760 },
+  // the same board in compact density (Settings > Card density)
+  { name: 'heavy-compact', width: 1280, height: 720 },
   { name: 'heavy-drawer', width: 520, height: 1100 },
   // the same drawer scrolled to where the checklists start: 60 items, what the owner scrolls through
   { name: 'heavy-drawer-checklists', width: 520, height: 1100, scrollTo: '[data-trello="checklists"]' }
@@ -165,7 +167,7 @@ if (!chromium || !fs.existsSync(chromium)) {
   fail(3, 'Chromium not found: install it, or pass --chromium <file> / set TRELLO_CHROMIUM')
 }
 
-const { findNodeModules, SKIP_REASON, makeBackend, makeCtx, setupDom, oid } = await import(pathToFileURL(path.join(ROOT, 'tests', 'desktop', 'harness.mjs')).href)
+const { findNodeModules, SKIP_REASON, makeBackend, makeCtx, setupDom, oid, COUNT_SHIM, applyHeavyFixture: heavyFixture } = await import(pathToFileURL(path.join(ROOT, 'tests', 'desktop', 'harness.mjs')).href)
 const modules = findNodeModules()
 
 if (!modules) {
@@ -241,36 +243,6 @@ class FixedDate extends RealDate {
 globalThis.Date = FixedDate
 
 // -- load the pane against the visual SDK -------------------------------------
-
-// Counts how often each function component is called (rendered). Used by --measure only: the plugin file is
-// copied and its `react/jsx-runtime` import is pointed at this shim, so the plugin itself stays untouched.
-const COUNT_SHIM = `
-import * as rt from 'react/jsx-runtime'
-const G = (globalThis.__TRELLO_COUNT__ ||= { on: false, total: 0, calls: new Map(), byCard: new Map(), byItem: new Map() })
-const wrapped = new WeakMap()
-const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1)
-function wrap(fn) {
-  let w = wrapped.get(fn)
-  if (!w) {
-    const name = fn.displayName || fn.name || 'Anonymous'
-    w = { [name]: function (props, ref) {
-      if (G.on) {
-        G.total += 1
-        bump(G.calls, name)
-        if (name === 'CardRow' && props && props.card) bump(G.byCard, props.card.id)
-        if (name === 'ItemRow' && props && props.item) bump(G.byItem, props.item.id)
-      }
-      return fn(props, ref)
-    } }[name]
-    wrapped.set(fn, w)
-  }
-  return w
-}
-const prep = type => (typeof type === 'function' && !(type.prototype && type.prototype.isReactComponent) ? wrap(type) : type)
-export const Fragment = rt.Fragment
-export const jsx = (type, props, key) => rt.jsx(prep(type), props, key)
-export const jsxs = (type, props, key) => rt.jsxs(prep(type), props, key)
-`
 
 /**
  * Load a private copy of the pane against an SDK: `sdk-visual.mjs` (class-faithful markup, the screenshots)
@@ -475,25 +447,48 @@ const $ = (root, selector) => root.querySelector(selector)
 const $$ = (root, selector) => [...root.querySelectorAll(selector)]
 const text = el => (el.textContent || '').replace(/\s+/g, ' ').trim()
 
-async function withPane(width, drive, { connected = true, fixture = applyFixture } = {}) {
+async function withPane(width, drive, { connected = true, fixture = applyFixture, settings = null } = {}) {
   sdk.queryClient.reset()
   sdk.host.paneVisible.set(true)
 
   const backend = makeBackend({ connected })
   if (connected) fixture(backend)
   const ctx = makeCtx(sdk, backend)
+
+  if (settings) {
+    ctx.store.set('settings', settings)
+  }
+
   plugin.default.register(ctx)
 
   const ui = await env.mount(env.React.createElement(plugin.PaneRoot))
 
   try {
     await env.resizeTo(width)
+    await showLanesOnScreen(ui.container, width)
     await drive({ root: ui.container, ctx, backend })
 
     return ui.container.innerHTML
   } finally {
     await ui.unmount()
   }
+}
+
+/**
+ * The page is static, so nothing would tell the lane strip which lanes are on screen. Do what the browser's
+ * IntersectionObserver does at scroll position 0: the lanes that fit the pane width are the visible ones.
+ */
+async function showLanesOnScreen(root, width) {
+  const lanes = $$(root, '[data-trello="lane"]')
+
+  if (!lanes.length || typeof env.intersect !== 'function') {
+    return
+  }
+
+  const laneWidth = Number(lanes[0].dataset.laneWidth)
+  const fit = Math.max(1, Math.floor((width - 24 + 10) / (laneWidth + 10)))
+
+  await env.intersect(lanes.slice(0, fit))
 }
 
 /** Many lanes and a lane with many cards: the two cases a real work board hits. */
@@ -517,330 +512,8 @@ function applyStressFixture(backend) {
   state.details = {}
 }
 
-// -- heavy board fixture (UI review) -----------------------------------------------
-//
-// A synthetic stand-in for a real work board: 10 lanes, the first one with 80 cards, titles from 8 to 120
-// characters, cards with and without due dates / labels / members, and one card whose drawer is as heavy as
-// the longest ones seen in practice. Everything comes from a seeded PRNG, so the output is byte-stable.
-
-function mulberry32(seed) {
-  let a = seed >>> 0
-
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0
-    let t = a
-    t = Math.imul(t ^ (t >>> 15), t | 1)
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
-
-const HEAVY_LANES = ['Inbox', 'Triage', 'Backlog — grooming', 'Ready', 'In progress', 'In review', 'QA', 'Blocked / waiting on others', 'Release candidate', 'Done']
-// cards per lane; the first lane is the 80-card one
-const HEAVY_LANE_COUNTS = [80, 6, 14, 9, 22, 11, 5, 3, 17, 40]
-
-const HEAVY_TITLES = [
-  'Checkout — coupon field loses focus after validation',
-  'Export report to CSV',
-  'Rate limit headers missing on the search endpoint',
-  'Dark mode: chart gridlines too faint',
-  'Audit the retry policy of the webhook dispatcher',
-  'Migrate tooltips to the new component',
-  'Empty state for saved filters',
-  'Slow query on the activity feed (p95 above 2s)',
-  'Add a keyboard shortcut to toggle the sidebar',
-  'Typo on the pricing page',
-  'Replace the date picker in the invoice form',
-  'Onboarding checklist does not persist after logout',
-  'Upgrade the build image to the latest LTS',
-  'Document the permission matrix for workspace roles',
-  'Notifications: group by thread instead of by event',
-  'Investigate flaky test in the billing suite',
-  'Mobile nav overlaps the cookie banner on small screens',
-  'Add pagination to the audit log',
-  'Support SSO group mapping for contractors',
-  'Clean up unused feature flags'
-]
-
-// exactly 8 characters each
-const HEAVY_SHORT = ['Fix typo', 'Bump dep', 'Add logs', 'Cache it', 'Lint fix', 'Alt text', 'Dead css', 'Fix nits']
-
-// longer than 120 characters; cut to exactly 120 below
-const HEAVY_LONG_BASES = [
-  'Investigate why the nightly synchronisation job intermittently duplicates invoices for customers that changed plan mid-cycle',
-  'Make the permission checks of the bulk-edit dialog consistent with the single-edit flow, including the audit trail and the undo toast',
-  'Rework the empty, loading and error states of every report so they stop shifting the layout when the data arrives late or twice'
-]
-
-if (!HEAVY_SHORT.every(t => t.length === 8) || !HEAVY_LONG_BASES.every(t => t.length > 120)) {
-  throw new Error('heavy fixture: title pools do not meet the 8/120 character contract')
-}
-
-const heavyLongTitle = i => {
-  const cut = HEAVY_LONG_BASES[i % HEAVY_LONG_BASES.length].slice(0, 120)
-
-  return cut.endsWith(' ') ? `${cut.slice(0, 119)}.` : cut
-}
-
-const HEAVY_DESC = [
-  '# Release 4.2 — regression sweep',
-  '',
-  'This card tracks the **regression sweep** for release 4.2. Nothing ships until every checklist below is green and the rollout notes were reviewed by a second person. Background lives in the [release runbook](https://example.invalid/runbook) and the [incident template](https://example.invalid/incident).',
-  '',
-  '## Scope',
-  '',
-  '- Billing: invoices, proration and the new `retry_policy` defaults',
-  '- Search: the ranking pipeline behind the `search_v2` flag',
-  '- Onboarding: steps 1 to 4 on web and on mobile web',
-  '- Exports: CSV and XLSX for reports larger than 50k rows',
-  '- Permissions: the workspace role matrix after the SSO change',
-  '',
-  '## How to run the sweep',
-  '',
-  'Use the staging stack, never the shared demo tenant. Reset the fixtures first and keep the *seed* identical between runs so failures are comparable:',
-  '',
-  '```bash',
-  'make fixtures SEED=4242',
-  'make sweep ENV=staging SUITE=regression',
-  'make report OUT=build/sweep-4.2.html',
-  '```',
-  '',
-  '## Known risks',
-  '',
-  '1. The proration job runs at 02:00 UTC and overlaps with the nightly export.',
-  '2. `search_v2` doubles the index size; check disk alerts before enabling it for everyone.',
-  '3. SSO group mapping is cached for 15 minutes, so role changes look delayed in the UI.',
-  '',
-  '## Rollout',
-  '',
-  'Ramp in four steps (5%, 25%, 50%, 100%) with at least one hour between steps. Roll back with the **kill switch** described in [the runbook](https://example.invalid/runbook#rollback) if the error budget burns faster than 2x. Post the status in the release channel after every step and attach the dashboard snapshot to this card.',
-  '',
-  '## Notes from the last release',
-  '',
-  '- The export timeout was raised from 30s to 120s and never lowered again.',
-  '- Two customers hit the legacy date picker on Safari; see https://example.invalid/issues/4812 for the repro.',
-  '- The rollback rehearsal took 18 minutes instead of the planned 5.',
-  '',
-  '## Contacts',
-  '',
-  '- Release captain: Ada Demo',
-  '- Billing owner: Lin Demo, on call until Friday',
-  '- Support liaison: see the rota at https://example.invalid/rota'
-].join('\n')
-
-if (HEAVY_DESC.length < 1900 || HEAVY_DESC.length > 2100) {
-  throw new Error(`heavy fixture: description is ${HEAVY_DESC.length} characters, expected about 2000`)
-}
-
-const HEAVY_CHECKLISTS = [
-  {
-    name: 'Pre-flight',
-    items: [
-      'Freeze the release branch', 'Tag the release candidate', 'Reset the staging fixtures with the agreed seed', 'Verify the database migration dry-run output',
-      'Confirm the feature flags are off by default', 'Snapshot the dashboards before the rollout starts', 'Check that the on-call rota is published',
-      'Review the open P1 and P2 tickets', 'Run the smoke suite against staging', 'Confirm the rollback artefact exists and is downloadable',
-      'Export the current error budget', 'Notify support about the maintenance window', 'Pre-warm the search index', 'Check disk alerts on the search cluster',
-      'Verify the SSO group mapping in staging', 'Confirm the status page template', 'Back up the feature flag configuration', 'Lock the dependency versions',
-      'Share the rollout plan with the release channel', 'Get the second reviewer to sign the runbook'
-    ]
-  },
-  {
-    name: 'Regression sweep',
-    items: [
-      'Billing: create, pay and refund an invoice', 'Billing: proration when the plan changes mid-cycle', 'Billing: retry policy after a declined card', 'Search: ranking for the top 50 queries',
-      'Search: empty results and typo tolerance', 'Search: filters combined with sorting', 'Onboarding: all four steps on web', 'Onboarding: cancelling on step 2 does not leave the session half-open',
-      'Onboarding: resume after logout', 'Exports: CSV with 50k rows', 'Exports: XLSX with accents and emoji in the headers', 'Exports: cancel an export in progress',
-      'Permissions: viewer cannot edit', 'Permissions: contractors see only their workspaces', 'Permissions: role change is visible after the cache expires', 'Notifications: grouped by thread',
-      'Notifications: mute a thread and verify the digest', 'Accessibility: keyboard-only pass over the main flows', 'Accessibility: contrast on the secondary button and the disabled states',
-      'Performance: p95 of the activity feed stays under 1.5s'
-    ]
-  },
-  {
-    name: 'Rollout and follow-up',
-    items: [
-      'Ramp to 5% and watch the error budget for an hour', 'Ramp to 25%', 'Ramp to 50%', 'Ramp to 100%', 'Post the status after every step', 'Attach the dashboard snapshots to this card',
-      'Disable the legacy date picker flag', 'Remove the temporary export timeout', 'Lower the retry ceiling back to 3', 'Archive the staging fixtures', 'Write the rollout summary',
-      'Schedule the retrospective', 'Update the runbook with what we learned', 'File follow-up tickets for every workaround', 'Close the P2 tickets that shipped',
-      'Notify support that the maintenance window is over', 'Delete the release branch', 'Update the changelog', 'Publish the customer-facing notes', 'Thank the people on call'
-    ]
-  }
-]
-
-const HEAVY_COMMENT_BASES = [
-  'Ramp to 25% looks clean. Error rate flat at 0.12%, p95 on the activity feed went from 1.9s to 1.4s. I am holding at 25% for the full hour as agreed and will post the dashboard snapshot here before moving on.',
-  'Heads up: the proration job overlapped with the nightly export again and the export took 41 minutes instead of the usual 12. Not a regression of this release, but we should move the export to 04:00 UTC before the next one. I opened a follow-up ticket.',
-  'Reproduced the onboarding cancel bug on Safari 17 only after navigating back from step 3. On Chrome it never happens. The session cookie is cleared but the wizard state in local storage survives, so the next visit resumes in a half-done step. Fix is a two-liner, test attached to the PR.',
-  'Search ranking diff for the top 50 queries is attached. 46 are identical, 3 improved, 1 got worse ("invoice reminder", the exact-match boost lost to a longer document). I think that one is acceptable, but I would like a second opinion from someone who owns the ranking model.',
-  'SSO group mapping: confirmed the 15 minute cache is the cause of the delayed role changes. Support should tell customers to wait or sign out and in. Documented in the runbook under "Known risks".',
-  'Accessibility pass done with keyboard only. Two findings: the secondary button on the invoice form has contrast 3.9:1 in dark mode, and the date picker traps focus on Escape. Both filed, neither blocks the release in my view.',
-  'Rollback rehearsal finished. It took 18 minutes, mostly waiting for the search index to reload. If we pre-warm the index on the old version the rehearsal should drop under 7. Adding that to the pre-flight checklist.',
-  'Exports: CSV with 50k rows is fine (38s). XLSX with emoji in the headers fails on the second sheet because of the sheet name limit. Workaround is to truncate to 31 characters, patch is in review.',
-  'Billing sandbox declined every card on Tuesday afternoon, so the retry-policy tests were inconclusive. Re-ran them this morning against the new sandbox account and all 12 scenarios pass.',
-  'Can someone confirm the contractors workspace mapping? In staging, contractors from two vendors see each other\'s workspaces. Production data looks right, but I would like to be sure before we ramp past 5%.',
-  'Dashboards snapshot before the rollout is attached to the card, together with the error budget export. Budget at 94% remaining, no burn in the last 7 days.',
-  'Created the card from the planning meeting. Scope and owners are in the description; please keep the checklists up to date as you go so the status post can be generated from them.'
-]
-
-// Real comments run long: most get one or two extra sentences, so they span roughly 180 to 600 characters.
-const HEAVY_COMMENT_TAILS = [
-  ' I attached the exact commands and the output so anyone can rerun them without asking me.',
-  ' This is the third time we see this on a Tuesday, so I suspect the cron overlap is not a coincidence and we should look at the schedule before touching the code.',
-  ' Not blocking, but please do not close this card until the follow-up ticket is linked here, otherwise we will lose the context again next quarter.',
-  ' For reference, the same scenario passed on the previous release candidate, so the regression must have come in with the dependency bump from last week.',
-  ' If you disagree with any of this, say so here and not in the chat thread, because the thread is not archived and the next release captain will not find it.',
-  ' Dashboards, logs and the raw export are in the shared folder linked from the description; the folder is read-only for everyone except the release captain.'
-]
-
-const HEAVY_COMMENTS = HEAVY_COMMENT_BASES.map((base, i) => (i % 4 === 3 ? base : `${base}${HEAVY_COMMENT_TAILS[i % 6]}${i % 4 === 2 ? HEAVY_COMMENT_TAILS[(i + 1) % 6] : ''}`))
-
-function applyHeavyFixture(backend, { firstLane = 80 } = {}) {
-  const { state } = backend
-  const B1 = backend.ids.B1
-  const rand = mulberry32(20261026)
-  const pick = list => list[Math.floor(rand() * list.length)]
-
-  const members = [
-    { id: oid(21), username: 'ada', full_name: 'Ada Demo', initials: 'AD', avatar_url: null },
-    { id: oid(22), username: 'lin', full_name: 'Lin Demo', initials: 'LD', avatar_url: null },
-    { id: oid(23), username: 'sam', full_name: 'Sam Demo', initials: 'SD', avatar_url: null },
-    { id: oid(24), username: 'kai', full_name: 'Kai Demo', initials: 'KD', avatar_url: null },
-    { id: oid(25), username: 'noor', full_name: 'Noor Demo', initials: 'ND', avatar_url: null },
-    { id: oid(26), username: 'tom', full_name: 'Tom Demo', initials: 'TD', avatar_url: null }
-  ]
-
-  // the last two board labels are unnamed colours, rendered as bars; one name is deliberately long
-  const labels = [
-    { id: oid(31), name: 'bug', color: 'red' },
-    { id: oid(32), name: 'onboarding', color: 'blue' },
-    { id: oid(33), name: 'copy', color: 'yellow' },
-    { id: oid(34), name: 'design', color: 'purple' },
-    { id: oid(35), name: 'a11y', color: 'green' },
-    { id: oid(36), name: 'perf', color: 'orange' },
-    { id: oid(37), name: 'customer-escalation-needed', color: 'pink' },
-    { id: oid(38), name: '', color: 'sky' }
-  ]
-
-  const labelText = l => l.name || l.color
-  const counts = HEAVY_LANE_COUNTS.map((n, i) => (i === 0 ? firstLane : n))
-
-  const lists = HEAVY_LANES.map((name, i) => ({ id: oid(200 + i), name, pos: i + 1, closed: false }))
-  const cards = []
-  let n = 0
-
-  lists.forEach((list, laneIndex) => {
-    for (let k = 0; k < counts[laneIndex]; k += 1) {
-      n += 1
-      const roll = rand()
-      let name
-
-      if (n % 7 === 0) {
-        name = HEAVY_SHORT[n % HEAVY_SHORT.length]
-      } else if (n % 9 === 0) {
-        name = heavyLongTitle(Math.floor(n / 9))
-      } else {
-        name = `${pick(HEAVY_TITLES)}${roll < 0.3 ? ` (${1 + Math.floor(rand() * 40)})` : ''}`
-      }
-
-      const dueRoll = rand()
-      let due = null
-      let dueComplete = false
-
-      if (dueRoll >= 0.4 && dueRoll < 0.6) {
-        due = iso(-(1 + Math.floor(rand() * 20)) * DAY)
-      } else if (dueRoll >= 0.6 && dueRoll < 0.75) {
-        due = iso((4 + Math.floor(rand() * 36)) * HOUR)
-      } else if (dueRoll >= 0.75 && dueRoll < 0.95) {
-        due = iso((3 + Math.floor(rand() * 28)) * DAY)
-      } else if (dueRoll >= 0.95) {
-        due = iso(-(1 + Math.floor(rand() * 10)) * DAY)
-        dueComplete = true
-      }
-
-      const labelCount = rand() < 0.25 ? 0 : 1 + Math.floor(rand() * 4)
-      const chosen = []
-
-      while (chosen.length < labelCount) {
-        const l = pick(labels)
-
-        if (!chosen.includes(l)) {
-          chosen.push(l)
-        }
-      }
-
-      const memberRoll = rand()
-      const memberCount = memberRoll < 0.4 ? 0 : memberRoll < 0.75 ? 1 : memberRoll < 0.93 ? 2 : 4 + Math.floor(rand() * 2)
-      const people = []
-
-      while (people.length < memberCount) {
-        const m = pick(members)
-
-        if (!people.includes(m.id)) {
-          people.push(m.id)
-        }
-      }
-      const total = rand() < 0.45 ? 0 : 2 + Math.floor(rand() * 18)
-      const short = `Hvy${String(n).padStart(5, '0')}`
-
-      cards.push({
-        id: oid(1000 + n), name, id_list: list.id, due, due_complete: dueComplete,
-        labels: chosen.map(labelText), label_ids: chosen.map(l => l.id), id_members: people,
-        short_link: short, url: `https://trello.com/c/${short}`,
-        comment_count: rand() < 0.5 ? 0 : 1 + Math.floor(rand() * 14), attachment_count: rand() < 0.6 ? 0 : 1 + Math.floor(rand() * 6),
-        checklist: { total, done: Math.floor(rand() * (total + 1)) }, last_activity: iso(-(1 + Math.floor(rand() * 200)) * HOUR)
-      })
-    }
-  })
-
-  // the heavy card: first card of "In progress". The harness' checklist routes work on oid(101), so it takes that id.
-  const inProgress = lists[4]
-  const heavy = cards.find(c => c.id_list === inProgress.id)
-  const heavyChecklists = HEAVY_CHECKLISTS.map((cl, ci) => ({
-    id: oid(300 + ci), name: cl.name,
-    items: cl.items.map((name, ii) => ({ id: oid(320 + ci * 20 + ii), name, state: (ci * 3 + ii * 7) % 5 < 2 ? 'complete' : 'incomplete' }))
-  }))
-  const heavyDone = heavyChecklists.flatMap(c => c.items).filter(i => i.state === 'complete').length
-
-  Object.assign(heavy, {
-    id: oid(101), name: 'Release 4.2 — regression sweep and rollout checklist', short_link: 'Hvy00101', url: 'https://trello.com/c/Hvy00101',
-    due: iso(-3 * DAY), due_complete: false,
-    labels: [labels[0], labels[1], labels[5], labels[6]].map(labelText), label_ids: [oid(31), oid(32), oid(36), oid(37)],
-    id_members: [members[0].id, members[1].id],
-    comment_count: HEAVY_COMMENTS.length, attachment_count: 6, checklist: { total: 60, done: heavyDone }, last_activity: iso(-25 * 60 * 1000)
-  })
-
-  const authors = ['Ada Demo', 'Lin Demo', 'Sam Demo', 'Kai Demo']
-  const attachments = [
-    { name: 'release-notes-draft.pdf', url: 'https://example.invalid/files/release-notes-draft.pdf', is_upload: true, bytes: 482113, mime: 'application/pdf' },
-    { name: 'perf-before-after.png', url: 'https://example.invalid/files/perf-before-after.png', is_upload: true, bytes: 221044, mime: 'image/png' },
-    { name: 'rollout-plan.xlsx', url: 'https://example.invalid/files/rollout-plan.xlsx', is_upload: true, bytes: 88231, mime: 'application/vnd.ms-excel' },
-    { name: 'incident-timeline-2026-09-30-search-index-outage-postmortem-draft-v3-final.md', url: 'https://example.invalid/files/timeline.md', is_upload: true, bytes: 9120, mime: 'text/markdown' },
-    { name: 'Release runbook', url: 'https://example.invalid/runbook', is_upload: false, bytes: null, mime: null },
-    { name: 'Dashboard — error budget', url: 'https://example.invalid/dashboards/error-budget', is_upload: false, bytes: null, mime: null }
-  ].map((a, i) => ({ id: oid(50 + i), ...a }))
-
-  const activityTypes = ['updateCard', 'commentCard', 'updateCheckItemStateOnCard', 'updateCheckItemStateOnCard', 'addChecklistToCard']
-  const activity = Array.from({ length: 20 }, (_, i) => ({
-    id: oid(500 + i), type: activityTypes[i % activityTypes.length], author: authors[i % authors.length], date: iso(-(i + 1) * 3 * HOUR),
-    text: ['moved from Ready to In progress', 'Ramp to 25% looks clean', 'completed Ramp to 5% and watch the error budget for an hour', 'completed Run the smoke suite against staging', 'added the checklist Rollout and follow-up'][i % 5]
-  }))
-
-  state.boards = [{ id: B1, name: 'Platform — release train', url: 'https://trello.com/b/hEaVy001', closed: false, starred: true }]
-  state.view = { board: state.boards[0], lists, cards, members, labels }
-
-  state.details = {
-    [heavy.id]: {
-      card: heavy,
-      desc: HEAVY_DESC,
-      list: { id: inProgress.id, name: inProgress.name },
-      board: { id: B1, name: state.boards[0].name },
-      checklists: heavyChecklists,
-      comments: HEAVY_COMMENTS.map((text, i) => ({ id: oid(60 + i), author: authors[i % authors.length], text, date: iso(-(i + 1) * 7 * HOUR) })),
-      attachments,
-      activity
-    }
-  }
-}
+// The heavy fixture lives in tests/desktop/harness.mjs (the render-count tests use it too); here it gets the fixed clock.
+const applyHeavyFixture = (backend, options = {}) => heavyFixture(backend, { now: NOW, ...options })
 
 const goToList = async (root, name) => {
   const chip = $$(root, '[data-trello="chip"]').find(el => text(el).startsWith(name))
@@ -864,6 +537,8 @@ const RENDERERS = {
   stress: () => withPane(900, async () => {}, { fixture: applyStressFixture }),
 
   'heavy-columns': () => withPane(1280, async () => {}, { fixture: applyHeavyFixture }),
+
+  'heavy-compact': () => withPane(1280, async () => {}, { fixture: applyHeavyFixture, settings: { density: 'compact' } }),
 
   // the first lane is the active one in list mode; 'j' selects its first card, as in the pane-list scene
   'heavy-list': () =>
@@ -1092,13 +767,18 @@ const countAll = el => el.querySelectorAll('*').length
  * before the board renders. The harness therefore answers getBoundingClientRect() for the pane root with the
  * requested width, and the pane mounts straight into its final mode.
  */
-async function boot(M, { width, fixture }) {
+async function boot(M, { width, fixture, settings = null }) {
   M.sdk.queryClient.reset()
   M.sdk.host.paneVisible.set(true)
 
   const backend = makeBackend({ connected: true })
   fixture(backend)
   const ctx = makeCtx(M.sdk, backend)
+
+  if (settings) {
+    ctx.store.set('settings', settings)
+  }
+
   M.plugin.default.register(ctx)
 
   const prof = { commits: 0, ms: 0 }
@@ -1165,6 +845,37 @@ async function counted(b, fn) {
   }
 }
 
+/**
+ * Information a card drops without telling: members beyond the avatars it draws that have no `+N`, and labels
+ * beyond the marks it draws that have no `+N`. Read from the rendered DOM against the backend's data.
+ */
+function overflowAudit(b) {
+  const byId = new Map(b.backend.state.view.cards.map(c => [c.id, c]))
+  const out = { avatarsHiddenSilently: 0, avatarOverflowChips: 0, labelsHiddenSilently: 0, labelOverflowChips: 0 }
+
+  for (const el of $$(b.root, '[data-trello="card"]')) {
+    const card = byId.get(el.dataset.cardId)
+    // the avatar group carries a data attribute now; before, it was the span pushed to the right edge of the meta row
+    const avatars = $(el, '[data-trello="avatars"]') || $$(el, 'span').find(x => x.style.marginLeft === 'auto')
+    const more = $(el, '[data-trello="avatars-more"]')
+    const drawnAvatars = avatars ? [...avatars.children].filter(c => c !== more).length : 0
+    const moreCount = more ? Number(/\d+/.exec(more.textContent)[0]) : 0
+    const known = card.id_members.filter(id => b.backend.state.view.members.some(m => m.id === id)).length
+
+    out.avatarsHiddenSilently += Math.max(0, known - drawnAvatars - moreCount)
+    out.avatarOverflowChips += more ? 1 : 0
+
+    const marks = $$(el, '[data-trello="label-chip"], [data-trello="label-bar"]').length
+    const labelMore = $(el, '[data-trello="label-more"]')
+    const labelMoreCount = labelMore ? Number(/\d+/.exec(labelMore.textContent)[0]) : 0
+
+    out.labelsHiddenSilently += Math.max(0, card.labels.length - marks - labelMoreCount)
+    out.labelOverflowChips += labelMore ? 1 : 0
+  }
+
+  return out
+}
+
 const REPS = 3
 const INTERACTION_REPS = 5
 async function measureMountAndDom(V) {
@@ -1172,6 +883,7 @@ async function measureMountAndDom(V) {
     { id: 'baseline-columns', width: 1280, fixture: applyFixture },
     { id: 'lane5-columns', width: 1280, fixture: b => applyHeavyFixture(b, { firstLane: 5 }) },
     { id: 'heavy-columns', width: 1280, fixture: applyHeavyFixture },
+    { id: 'heavy-compact', width: 1280, fixture: applyHeavyFixture, settings: { density: 'compact' } },
     { id: 'baseline-list', width: 480, fixture: applyFixture },
     { id: 'lane5-list', width: 480, fixture: b => applyHeavyFixture(b, { firstLane: 5 }) },
     { id: 'heavy-list', width: 480, fixture: applyHeavyFixture }
@@ -1213,7 +925,8 @@ async function measureMountAndDom(V) {
           cardNodesTotal: sumOf(perCard),
           firstLaneNodes: container ? countAll(container) : null,
           firstLaneCards: container ? $$(container, '[data-trello="card"]').length : null,
-          chromeNodes: countAll(b.root) - sumOf(perCard)
+          chromeNodes: countAll(b.root) - sumOf(perCard),
+          overflow: overflowAudit(b)
         }
       }
 
@@ -1290,6 +1003,7 @@ async function measureInteractions(S, label, fixture, { drawer = null } = {}) {
     await poll(K.view(boardId))()
   }, INTERACTION_REPS)
 
+  await env.key(workspace, 'j') // the first press selects from nothing; count the steady state (old card -> new card)
   out.selectNext = await repeat(async () => { await env.key(workspace, 'j') }, INTERACTION_REPS)
 
   if (drawer) {
@@ -1392,6 +1106,8 @@ function pageProbe() {
         labelRowH: labelRow ? rect(labelRow).height : 0,
         labelsWrapped: labelRow ? rect(labelRow).height > 20 : false,
         chipsTruncated: q('[data-trello="label-chip"]', c).filter(x => x.scrollWidth > x.clientWidth + 1).length,
+        chipsTruncatedWithoutTitle: q('[data-trello="label-chip"]', c).filter(x => x.scrollWidth > x.clientWidth + 1 && !x.title).length,
+        metaOverflow: (() => { const m = q('[data-trello="card-open"] > div', c)[0]; return m ? m.scrollWidth > m.clientWidth + 1 : false })(),
         due: q('[data-trello^="due-"]', c).length,
         checklist: q('[data-trello="checklist"]', c).length,
         comments: q('[data-trello="comments"]', c).length,
@@ -1408,6 +1124,8 @@ function pageProbe() {
       cardsWithLabels: per.filter(p => p.labels > 0).length,
       labelsWrapped: per.filter(p => p.labelsWrapped).length,
       chipsTruncated: total('chipsTruncated'),
+      chipsTruncatedWithoutTitle: total('chipsTruncatedWithoutTitle'),
+      metaOverflow: per.filter(p => p.metaOverflow).length,
       tokensPerCard: stat(tokens),
       labelsPerCard: stat(per.map(p => p.labels)),
       labelRowShare: total('labelRowH') / total('h'),
@@ -1500,6 +1218,23 @@ function pageProbe() {
     }
   }
 
+  // Does selecting a card move the ones below it? Take the selected card's action area out of the page (the row
+  // in the flow in the old layout, the overlay in the new one) and see how far the next card travels.
+  const selected = q('[data-selected="true"]')[0]
+  const send = selected && q('[data-trello="send"]', selected)[0]
+  const following = selected && selected.nextElementSibling
+
+  if (send && following) {
+    const before = rect(following).top
+
+    send.parentElement.remove()
+    out.selectionShift = before - rect(following).top
+  }
+
+  const strip = q('[data-trello="lane-strip"]')[0]
+
+  out.stripHeight = strip ? rect(strip).height : null
+
   return out
 }
 
@@ -1560,12 +1295,13 @@ async function inspectPage(browser, { width, height, file }, { relayout = false 
   }
 }
 
-const CV_CARD_100 = '[data-trello="card"]{content-visibility:auto;contain-intrinsic-size:auto 100px}'
-const CV_CARD_84 = '[data-trello="card"]{content-visibility:auto;contain-intrinsic-size:auto 84px}'
-const CV_LANE = '[data-trello="lane"]{content-visibility:auto;contain-intrinsic-size:auto 300px auto 600px}'
+// `content-visibility` as an experiment on the page, forced with !important so it works whatever the pane ships:
+// off (what the pane would cost without it) and on with the comfortable estimate.
+const CV_OFF = '[data-trello="card"]{content-visibility:visible !important}'
+const CV_ON_84 = '[data-trello="card"]{content-visibility:auto !important;contain-intrinsic-size:auto 84px !important}'
 
 async function measureLayout(browser, workDir) {
-  const names = ['pane-columns', 'heavy-columns', 'pane-list', 'heavy-list', 'card-drawer', 'heavy-drawer']
+  const names = ['pane-columns', 'heavy-columns', 'heavy-compact', 'pane-list', 'heavy-list', 'card-drawer', 'heavy-drawer']
   const out = {}
   const files = {}
 
@@ -1575,13 +1311,19 @@ async function measureLayout(browser, workDir) {
     files[name] = { scene, body, file: path.join(workDir, `${name}.html`) }
     fs.writeFileSync(files[name].file, page({ ...scene, body }))
     out[name] = await inspectPage(browser, { ...scene, file: files[name].file }, { relayout: true })
+
+    // `content-visibility` gives cards outside the viewport their estimated height, so card heights and the real
+    // scroll extent are read from a second copy of the page with it forced off
+    const naturalFile = path.join(workDir, `${name}-natural.html`)
+    fs.writeFileSync(naturalFile, page({ ...scene, body, extraCss: CV_OFF }))
+    out[name].natural = (await inspectPage(browser, { ...scene, file: naturalFile })).probe
   }
 
-  // what content-visibility would buy on the two heavy board scenes: style/layout time over 5 loads (median)
-  const variants = { baseline: '', 'cv-card (84px est.)': CV_CARD_84, 'cv-card (100px est.)': CV_CARD_100, 'cv-lane+card (84px est.)': `${CV_CARD_84}${CV_LANE}` }
+  // style/layout time over 5 loads (median) with content-visibility as rendered, forced off and forced on
+  const variants = { 'as rendered': '', 'content-visibility forced off': CV_OFF, 'content-visibility forced on (84px)': CV_ON_84 }
   out.contentVisibility = {}
 
-  for (const name of ['heavy-columns', 'heavy-list']) {
+  for (const name of ['heavy-columns', 'heavy-compact', 'heavy-list']) {
     out.contentVisibility[name] = {}
 
     for (const [variant, extraCss] of Object.entries(variants)) {
@@ -1662,18 +1404,73 @@ function fixtureStats() {
   }
 }
 
-/** How many `j` presses it takes to reach the first card of each lane in columns mode (the flat reading order). */
-function keyboardReach() {
+/**
+ * Key presses to reach the last lane of the heavy board in columns mode. `j` is computed from the reading order
+ * (nothing else moves between lanes in the old pane). `l` is really pressed in the pane: from nothing selected and
+ * from a selected card of the first lane; `null` when the pane does not react to it.
+ */
+async function keyboardReach(V) {
   const backend = makeBackend()
   applyHeavyFixture(backend)
   const view = backend.state.view
-  const ids = plugin.visibleCardIds(view, 'columns', null)
+  const ids = V.plugin.visibleCardIds(view, 'columns', null)
 
-  return view.lists.map(list => {
+  const lanes = view.lists.map(list => {
     const first = view.cards.find(c => c.id_list === list.id)
 
     return { lane: list.name, cards: view.cards.filter(c => c.id_list === list.id).length, jPressesToFirstCard: first ? ids.indexOf(first.id) + 1 : null }
   })
+
+  const lastLane = view.lists[view.lists.length - 1].id
+
+  const press = async (start, key) => {
+    const b = await boot(V, { width: 1280, fixture: applyHeavyFixture })
+    const workspace = $(b.root, '[data-trello="workspace"]')
+    const laneOfSelected = () => {
+      const card = $(b.root, '[data-trello="card"][data-selected="true"]')
+      const lane = card && card.closest('[data-trello="lane"]')
+
+      return lane ? lane.dataset.laneId || [...b.root.querySelectorAll('[data-trello="lane"]')].indexOf(lane) : null
+    }
+    const lastIndex = view.lists.length - 1
+    let presses = 0
+
+    try {
+      if (start === 'first-lane') {
+        await env.key(workspace, 'j')
+        presses = 0
+      }
+
+      const startedAt = laneOfSelected()
+
+      for (; presses < 40; presses += 1) {
+        const lane = laneOfSelected()
+
+        if (lane === lastLane || lane === lastIndex) {
+          return presses
+        }
+
+        const before = $(b.root, '[data-trello="card"][data-selected="true"]')
+
+        await env.key(workspace, key)
+
+        if ($(b.root, '[data-trello="card"][data-selected="true"]') === before && laneOfSelected() === startedAt && presses > 0) {
+          return null
+        }
+      }
+
+      return null
+    } finally {
+      await b.ui.unmount()
+    }
+  }
+
+  return {
+    lanes,
+    jToLastLane: lanes[lanes.length - 1].jPressesToFirstCard,
+    lFromNothing: await press('nothing', 'l'),
+    lFromFirstLane: await press('first-lane', 'l')
+  }
 }
 
 function readMemory() {
@@ -1733,7 +1530,7 @@ async function runMeasure() {
     heavy: await measureInteractions(S, 'heavy', applyHeavyFixture, { drawer: { match: 'Release 4.2', cardId: oid(101) } })
   }
 
-  result.keyboardReach = keyboardReach()
+  result.keyboardReach = await keyboardReach(V)
   result.fixture = fixtureStats()
   result.payload = payloadSizes()
 
@@ -1752,6 +1549,54 @@ async function runMeasure() {
   result.memory = readMemory()
 
   return result
+}
+
+/** The handful of numbers docs/UI-REVIEW.md tracks across changes, flat so two runs can be diffed. */
+function buildSummary(r) {
+  const L = r.layout
+  const heavy = r.interactions.heavy
+  const col = L['heavy-columns'].probe
+  const compact = L['heavy-compact'].probe
+  const list = L['heavy-list'].probe
+  const natural = { col: L['heavy-columns'].natural, compact: L['heavy-compact'].natural, list: L['heavy-list'].natural }
+  const audit = r.domAndMount['heavy-columns'].overflow
+  const cv = L.contentVisibility['heavy-columns']
+
+  return {
+    'relayout median ms, 80-card lane, columns': round(L['heavy-columns'].relayout.median, 1),
+    'relayout median ms, 80-card lane, list': round(L['heavy-list'].relayout.median, 1),
+    'relayout median ms, compact columns': round(L['heavy-compact'].relayout.median, 1),
+    'relayout median ms, columns with content-visibility forced off': round(cv['content-visibility forced off'].relayoutMedianMs, 1),
+    'CardRow renders per poll, nothing changed (207 cards)': heavy.pollUnchanged.cardRenders,
+    'CardRow renders per poll, one card changed': heavy.pollOneCardChanged.cardRenders,
+    'CardRow renders per selection move': heavy.selectNext.cardRenders,
+    'CardRow renders per checklist toggle': heavy.toggleItem.cardRenders,
+    'ItemRow renders per checklist toggle': heavy.toggleItem.itemRenders,
+    'Markdown renders per checklist toggle': heavy.toggleItem.byComponent.Markdown,
+    'commits per poll': heavy.pollUnchanged.commits,
+    'board renders per poll (BoardBody + Workspace)': heavy.pollUnchanged.byComponent.BoardBody + heavy.pollUnchanged.byComponent.Workspace,
+    'cards fully visible in the 80-card lane, comfortable (1280x720)': col.columns.lane1.cardsFullyVisible,
+    'cards fully visible in the 80-card lane, compact (1280x720)': compact.columns.lane1.cardsFullyVisible,
+    'cards fully visible, list mode, comfortable (480x760)': list.list.cardsFullyVisible,
+    'lane 1 scroll height px, comfortable (as rendered)': col.columns.lane1.scrollHeight,
+    'lane 1 scroll height px, comfortable (every card laid out)': natural.col.columns.lane1.scrollHeight,
+    'lane 1 scroll height px, compact (as rendered)': compact.columns.lane1.scrollHeight,
+    'lane 1 scroll height px, compact (every card laid out)': natural.compact.columns.lane1.scrollHeight,
+    'card height median px, comfortable': natural.col.cardHeight.median,
+    'card height median px, compact': natural.compact.cardHeight.median,
+    'avatars hidden without a +N': audit.avatarsHiddenSilently,
+    'labels hidden without a +N': audit.labelsHiddenSilently,
+    'label rows wrapped to 2+ lines': natural.col.noise.labelsWrapped,
+    'truncated label chips without a title': natural.col.noise.chipsTruncatedWithoutTitle,
+    'meta rows overflowing the card': natural.col.noise.metaOverflow + natural.compact.noise.metaOverflow,
+    'selected card pushes the next one by px': natural.list.selectionShift === undefined ? null : round(natural.list.selectionShift, 1),
+    'lane strip height px (columns mode)': col.stripHeight,
+    'j presses to the last lane': r.keyboardReach.jToLastLane,
+    'l presses to the last lane, from nothing selected': r.keyboardReach.lFromNothing,
+    'l presses to the last lane, from a card in lane 1': r.keyboardReach.lFromFirstLane,
+    'DOM nodes, 207 cards, comfortable': r.domAndMount['heavy-columns'].paneNodes,
+    'mount() worst ms, comfortable columns (jsdom, dev React)': round(r.domAndMount['heavy-columns'].worstMountMs, 1)
+  }
 }
 
 function printMeasurements(r) {
@@ -1790,7 +1635,8 @@ function printMeasurements(r) {
     [[fx.lanes, fx.cards, fx.firstLaneCards, `${fx.titleLength.min}/${fx.titleLength.median}/${fx.titleLength.max}`, fx.titles8, fx.titles120, fx.withoutDue, fx.withoutLabels, fx.labelsPerCardMax, fx.membersPerCardMax, fx.cardsWithMoreThan3Members, fx.hiddenMemberAvatars]]), '')
   lines.push(`heavy card: ${JSON.stringify(fx.heavyCard)}`, `filters: ${JSON.stringify(fx.filters)}; pending items per checklist: ${JSON.stringify(fx.pendingPerChecklist)}`, '')
 
-  lines.push('## Keyboard: j presses to reach the first card of each lane (columns mode)', '', mdTable(['lane', 'cards', 'j presses'], r.keyboardReach.map(k => [k.lane, k.cards, k.jPressesToFirstCard])), '')
+  lines.push('## Keyboard: j presses to reach the first card of each lane (columns mode)', '', mdTable(['lane', 'cards', 'j presses'], r.keyboardReach.lanes.map(k => [k.lane, k.cards, k.jPressesToFirstCard])), '')
+  lines.push(`last lane: ${r.keyboardReach.jToLastLane} j presses; l presses: ${r.keyboardReach.lFromNothing} from nothing selected, ${r.keyboardReach.lFromFirstLane} from a card in lane 1 (null = the pane does not react to l)`, '')
 
   lines.push('## Payload the pane polls (JSON bytes)', '', mdTable(['what', 'bytes'], [['heavy /view', r.payload.heavyViewBytes], ['  per card', r.payload.heavyViewBytesPerCard], ['baseline /view', r.payload.baselineViewBytes], ['heavy card detail', r.payload.heavyDetailBytes], ['baseline card detail', r.payload.baselineDetailBytes]]), '')
 
@@ -1813,11 +1659,14 @@ function printMeasurements(r) {
   const nz = k => L[k].probe.noise
   lines.push('## Visual density per card (real Chromium; shares are of card height)', '')
   lines.push(mdTable(['scene', 'cards', 'titles clamped at 2 lines', 'cards with labels', 'label rows wrapped to 2+ lines', 'label chips truncated', 'tokens per card median (max)', 'labels per card median (max)', 'label rows share of card height', 'title share of card height', 'avatars shown max'],
-    ['pane-columns', 'heavy-columns'].map(k => [k, nz(k).cards, nz(k).titlesClamped, nz(k).cardsWithLabels, nz(k).labelsWrapped, nz(k).chipsTruncated, `${nz(k).tokensPerCard.median} (${nz(k).tokensPerCard.max})`, `${nz(k).labelsPerCard.median} (${nz(k).labelsPerCard.max})`, `${f(nz(k).labelRowShare * 100, 0)}%`, `${f(nz(k).titleShare * 100, 0)}%`, nz(k).avatarsMax])), '')
+    ['pane-columns', 'heavy-columns', 'heavy-compact'].map(k => [k, nz(k).cards, nz(k).titlesClamped, nz(k).cardsWithLabels, nz(k).labelsWrapped, nz(k).chipsTruncated, `${nz(k).tokensPerCard.median} (${nz(k).tokensPerCard.max})`, `${nz(k).labelsPerCard.median} (${nz(k).labelsPerCard.max})`, `${f(nz(k).labelRowShare * 100, 0)}%`, `${f(nz(k).titleShare * 100, 0)}%`, nz(k).avatarsMax])), '')
 
   lines.push('## content-visibility experiment (CSS injected into the serialized page only; median of 5 loads)', '')
   lines.push(mdTable(['scene', 'variant', 'style ms', 'layout ms', 'layout passes', 'full relayout median ms', 'lane scrollHeight'],
     Object.entries(L.contentVisibility).flatMap(([scene, variants]) => Object.entries(variants).map(([variant, v]) => [scene, variant, f(v.styleMs, 2), f(v.layoutMs, 2), v.layoutCount, f(v.relayoutMedianMs, 2), f(v.scrollHeight, 0)]))), '')
+
+  r.summary = buildSummary(r)
+  lines.push('## Summary (flat, for before/after comparisons)', '', mdTable(['metric', 'value'], Object.entries(r.summary)), '')
 
   lines.push('## Memory', '', `process peak RSS (VmHWM): ${r.memory.processPeakRssMB} MB; cgroup memory.peak: ${r.memory.cgroupPeakMB} MB (memory.max ${r.memory.cgroupMaxMB}, swap.max ${r.memory.cgroupSwapMaxMB})`)
 
@@ -1830,12 +1679,14 @@ if (args.measure) {
   try {
     const result = await runMeasure()
 
+    const report = printMeasurements(result)
+
     if (args.measureOut) {
       fs.mkdirSync(path.dirname(path.resolve(args.measureOut)), { recursive: true })
       fs.writeFileSync(args.measureOut, `${JSON.stringify(result, null, 2)}\n`)
     }
 
-    console.log(printMeasurements(result))
+    console.log(report)
   } catch (err) {
     fail(6, `measure: ${err instanceof Error ? err.stack : String(err)}`)
   } finally {
