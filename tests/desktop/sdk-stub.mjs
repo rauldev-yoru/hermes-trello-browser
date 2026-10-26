@@ -13,6 +13,7 @@ export { atom, computed }
 export const useValue = useStore
 export const PALETTE_AREA = 'palette'
 export const PANES_AREA = 'panes'
+export const TRANSCRIPT_DIRECTIVE_AREA = 'transcript.directives'
 export const cn = (...a) => a.filter(Boolean).join(' ')
 export const haptic = () => {}
 export const isSubmitEnter = event => event.key === 'Enter' && !(event.nativeEvent && event.nativeEvent.isComposing)

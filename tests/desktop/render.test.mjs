@@ -149,8 +149,15 @@ test('desktop pane render harness', { skip }, async t => {
     assert.ok($(drawer, 'textarea'), 'comment composer')
     assert.ok(text($(drawer, '[data-trello="attachments"]')).includes('repro.mov'))
     assert.equal($$($(drawer, '[data-trello="attachments"]'), 'button').length, 1, 'only the attachment with a URL can be opened')
-    assert.ok(text($(drawer, '[data-trello="activity"]')).includes('Last activity'))
-    assert.ok(text($(drawer, '[data-trello="activity"]')).includes('RM commented'))
+    const activity = $(drawer, '[data-trello="activity"]')
+    const rows = $$(activity, '[data-trello="activity-row"]')
+    assert.deepEqual(rows.map(r => r.getAttribute('data-trello-type')), ['updateCard', 'commentCard', 'updateCheckItemStateOnCard', 'createCard'])
+    assert.ok(text(rows[0]).includes('Ada Demo') && text(rows[0]).includes('moved from Backlog to In progress'))
+    const ago = (n, unit) => new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(n, unit)
+    assert.ok(text(rows[0]).includes(ago(-30, 'minute')), text(rows[0]))
+    assert.ok(text(rows[2]).includes(ago(-1, 'day')), text(rows[2]))
+    assert.ok(text(rows[1]).includes('still happens on build 3.4'))
+    assert.equal(new Set(rows.map(r => $(r, '[data-icon]').getAttribute('data-icon'))).size, 4, 'one icon per type')
     assert.ok($(drawer, '[data-trello="drawer-send"]'))
     assert.ok($(drawer, '[data-trello="suggest"]'))
     assert.equal(backend.callsTo('GET', /^\/cards\//).length, 1)
@@ -195,7 +202,7 @@ test('desktop pane render harness', { skip }, async t => {
   await scenario('error state with retry when the board cannot be loaded', { setup: b => { release503 = b.failWhen((m, p) => /\/view$/.test(p), apiError(503, 'trello_unavailable', 'Trello is unreachable right now.')) } }, async ({ root }) => {
     const error = $(root, '[data-error]')
     assert.ok(error, 'error state')
-    assert.ok(text(error).includes('Trello is unreachable right now.'))
+    assert.ok(text(error).includes('cannot reach Trello'), 'the backend answered: Trello itself is the problem')
     assert.equal($$(root, '[data-trello="card"]').length, 0)
     release503()
     await env.click(byText(error, 'button', 'Retry'))
@@ -208,6 +215,38 @@ test('desktop pane render harness', { skip }, async t => {
     assert.ok(error)
     assert.ok(text(error).includes('did not answer'))
     assert.ok($(error, '[data-trello="retry"]'))
+  })
+
+  const raw = (status, body) => Object.assign(new Error(`${status}: ${typeof body === 'string' ? body : JSON.stringify(body)}`), { statusCode: status })
+  const errorOf = root => $(root, '[data-trello="error"]')
+
+  await scenario('plugin not mounted for the profile: a specific explanation with retry', { backend: Object.assign(makeBackend(), { rest: async () => { throw raw(404, { detail: 'Plugin not found' }) } }) }, async ({ root }) => {
+    const error = errorOf(root)
+    assert.ok(error, 'error body')
+    assert.equal(error.getAttribute('data-trello-error'), 'plugin_not_mounted')
+    assert.ok(text(error).includes('not mounted for this profile'))
+    assert.ok(text(error).includes('restart the dashboard'))
+    assert.ok(!text(error).includes('Something went wrong'))
+    assert.ok($(error, '[data-trello="retry"]'))
+    assert.equal($(root, '[data-trello="connect"]'), null)
+  })
+
+  await scenario('backend down (503 without our contract): no connection, with retry', { backend: Object.assign(makeBackend(), { rest: async () => { throw raw(503, '<html>Service Unavailable</html>') } }) }, async ({ root }) => {
+    const error = errorOf(root)
+    assert.equal(error.getAttribute('data-trello-error'), 'network')
+    assert.ok(text(error).includes('No connection to the Trello backend'))
+    assert.ok($(error, '[data-trello="retry"]'))
+  })
+
+  await scenario('401 credentials_rejected from the board view offers the connect form again', { setup: b => { b.failWhen((m, p) => /\/view$/.test(p), apiError(401, 'credentials_rejected', 'rejected')) } }, async ({ root }) => {
+    assert.ok($(root, '[data-trello="connect"]'), 'connect form')
+    assert.ok($(root, '[data-trello="rejected"]'), 'says the credentials were rejected')
+    assert.equal(errorOf(root), null)
+  })
+
+  await scenario('424 not_connected from the boards list shows the connect form', { setup: b => { b.failWhen((m, p) => p === '/boards', apiError(424, 'not_connected', 'no')) } }, async ({ root }) => {
+    assert.ok($(root, '[data-trello="connect"]'))
+    assert.equal($(root, '[data-trello="rejected"]'), null)
   })
 
   await scenario('an account without boards shows an empty state', { setup: b => { b.state.boards = [] } }, async ({ root }) => {
@@ -362,7 +401,7 @@ test('desktop pane render harness', { skip }, async t => {
     await env.click(checkbox())
     assert.equal(checkbox().checked, true, 'rolled back to the previous state')
     assert.ok(progress().includes('☑ 3/4'))
-    assert.ok(sdk.notifications.some(n => n.kind === 'error' && n.message.includes('unreachable')))
+    assert.ok(sdk.notifications.some(n => n.kind === 'error' && n.message.includes('cannot reach Trello')))
     clear()
   })
 
@@ -538,8 +577,17 @@ test('desktop pane render harness', { skip }, async t => {
     await env.click(byText(drawer(), 'button', 'Clear'))
     assert.deepEqual(backend.callsTo('PATCH', /^\/cards\//).at(-1).body, { due: null })
 
+    // two labels share the color "red" (one has no name): the editor works from label ids
     await env.click($(drawer(), '[data-trello="labels-button"]'))
-    await env.click(drawer().querySelector('input[aria-label="onboarding"]'))
+    const box = name => drawer().querySelector(`input[aria-label="${name}"]`)
+    assert.equal(box('bug').disabled, false)
+    assert.equal(box('red').disabled, false, 'no ambiguity lock')
+    assert.deepEqual([box('bug').checked, box('red').checked, box('onboarding').checked], [true, true, false])
+    await env.click(box('red'))
+    assert.deepEqual(backend.callsTo('PATCH', /^\/cards\//).at(-1).body, { id_labels: [oid(31)] })
+    await env.click(box('red'))
+    assert.deepEqual(backend.callsTo('PATCH', /^\/cards\//).at(-1).body, { id_labels: [oid(31), oid(32)] })
+    await env.click(box('onboarding'))
     assert.deepEqual(backend.callsTo('PATCH', /^\/cards\//).at(-1).body, { id_labels: [oid(31), oid(32), oid(33)] })
 
     await env.click($(drawer(), '[data-trello="archive"]'))
@@ -556,5 +604,76 @@ test('desktop pane render harness', { skip }, async t => {
     await openCard(root, 'Onboarding')
     await env.click(byText($(root, '[data-trello="drawer"]'), 'button', 'Open in Trello'))
     assert.deepEqual(ctx.opened, ['https://trello.com/c/Card0001'])
+  })
+
+  // -- transcript directive ---------------------------------------------------
+  const chip = async (ctx, attrs, source = '::trello') => {
+    const contribution = ctx.registered.find(c => c.area === 'transcript.directives')
+    assert.ok(contribution, 'the directive is registered')
+
+    return env.mount(contribution.data.render({ attrs, source, streaming: false }))
+  }
+
+  await scenario('directive: registered as "trello" and makes no request until it appears', {}, async ({ ctx, backend }) => {
+    const contribution = ctx.registered.find(c => c.area === 'transcript.directives')
+    assert.equal(contribution.data.name, 'trello')
+    assert.equal(typeof contribution.data.render, 'function')
+    assert.equal(backend.callsTo('GET', /^\/cards\//).length, 0)
+  })
+
+  await scenario('directive: a short link renders a live chip with name, list, due and open', {}, async ({ ctx, backend }) => {
+    const gate = backend.hold((m, p) => /^\/cards\//.test(p))
+    const ui = await chip(ctx, { card: 'Card0001' }, '::trello{card="Card0001"}')
+    assert.ok($(ui.container, '[data-trello="chip-loading"]'), 'Skeleton while loading')
+    gate()
+    await env.settle()
+    const el = $(ui.container, '[data-trello="chip"]')
+    assert.ok(el)
+    const label = text(el)
+    assert.ok(label.includes('Onboarding — step 2 has no exit on cancel'))
+    assert.ok(label.includes('in In progress'))
+    assert.ok($(el, '[data-trello^="due-"]'), 'due chip when the card has a due date')
+    assert.equal(backend.callsTo('GET', /^\/cards\/Card0001$/).length, 1)
+    await env.click($(el, '[data-trello="chip-open"]'))
+    assert.deepEqual(ctx.opened, ['https://trello.com/c/Card0001'])
+    await ui.unmount()
+  })
+
+  await scenario('directive: a 24-hex id works and a card without due shows no due chip', {}, async ({ ctx, backend }) => {
+    const ui = await chip(ctx, { card: oid(103) })
+    const el = $(ui.container, '[data-trello="chip"]')
+    assert.ok(text(el).includes('Export report to CSV'))
+    assert.equal($(el, '[data-trello^="due-"]'), null)
+    await ui.unmount()
+  })
+
+  await scenario('directive: 404 and invalid ids degrade to a minimal chip with the attrs text', {}, async ({ ctx, backend }) => {
+    const missing = await chip(ctx, { card: 'Zz9Zz9Zz' })
+    assert.ok($(missing.container, '[data-trello="chip-plain"]'))
+    assert.equal(text(missing.container), 'Zz9Zz9Zz')
+    assert.equal($(missing.container, '[data-trello="chip-open"]'), null)
+    assert.equal(backend.callsTo('GET', /^\/cards\/Zz9Zz9Zz$/).length, 1)
+    await missing.unmount()
+
+    const before = backend.calls.length
+    const weird = '../../etc/passwd <script>alert(1)</script> ' + 'x'.repeat(200)
+    const odd = await chip(ctx, { card: weird })
+    assert.ok($(odd.container, '[data-trello="chip-plain"]'))
+    assert.equal($(odd.container, 'script'), null, 'text only, never markup')
+    assert.ok(text(odd.container).length <= 62, 'long text is clamped')
+    assert.ok(text(odd.container).includes('../../etc/passwd'))
+    assert.equal(backend.calls.length, before, 'an invalid id never reaches the backend')
+    await odd.unmount()
+
+    const none = await chip(ctx, {}, '::trello')
+    assert.equal(text(none.container), '::trello')
+    await none.unmount()
+  })
+
+  await scenario('directive: a failing backend leaves the plain chip and the message intact', { setup: b => { b.failWhen((m, p) => /^\/cards\//.test(p), raw(503, '<html>x</html>')) } }, async ({ ctx }) => {
+    const ui = await chip(ctx, { card: 'Card0001' })
+    assert.ok($(ui.container, '[data-trello="chip-plain"]'))
+    assert.equal(text(ui.container), 'Card0001')
+    await ui.unmount()
   })
 })

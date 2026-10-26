@@ -11,9 +11,13 @@ const SOURCE = fs.readFileSync(path.join(ROOT, 'desktop', 'plugin.js'), 'utf8')
 const oid = n => n.toString(16).padStart(24, '0')
 const NOW = Date.parse('2026-10-25T12:00:00Z')
 
+// A local-calendar timestamp, so the expectations hold in any timezone.
+const localIso = (y, m, d, h = 12) => new Date(y, m - 1, d, h).toISOString()
+const LOCAL_NOW = new Date(2026, 9, 25, 12)
+
 const baseCard = (extra = {}) => ({
-  id: oid(101), name: 'Onboarding — step 2', id_list: oid(3), due: '2026-10-26T09:00:00.000Z', due_complete: false,
-  labels: ['red', 'bug'], id_members: [], short_link: 'AbCd1234', url: 'https://trello.com/c/AbCd1234',
+  id: oid(101), name: 'Onboarding — step 2', id_list: oid(3), due: localIso(2026, 10, 26, 9), due_complete: false,
+  labels: ['red', 'bug'], label_ids: ['a', 'b'], id_members: [], short_link: 'AbCd1234', url: 'https://trello.com/c/AbCd1234',
   comment_count: 0, attachment_count: 0, checklist: { total: 0, done: 0 }, last_activity: null, ...extra
 })
 
@@ -35,17 +39,81 @@ test('desktop helpers', { skip }, async t => {
     assert.deepEqual([network.status, network.code], [0, 'network'])
 
     const html = P.parseApiError(Object.assign(new Error('502: <html>bad gateway</html>'), { statusCode: 502 }))
-    assert.deepEqual([html.status, html.code], [502, 'http_502'])
+    assert.deepEqual([html.status, html.code], [502, 'network'], 'a gateway failure without our contract means the backend is not answering')
+    const odd = P.parseApiError(Object.assign(new Error('500: <html>boom</html>'), { statusCode: 500 }))
+    assert.deepEqual([odd.status, odd.code], [500, 'http_500'])
     assert.equal(P.parseApiError('boom').code, 'network')
   })
 
   await t.test('errorKey / isClientError', () => {
     assert.equal(P.errorKey({ code: 'credentials_rejected' }), 'credentials_rejected')
-    assert.equal(P.errorKey({ code: 'http_502' }), 'generic')
+    assert.equal(P.errorKey({ code: 'http_500' }), 'generic')
     assert.equal(P.isClientError(Object.assign(new Error('404: x'), { statusCode: 404 })), true)
     assert.equal(P.isClientError(Object.assign(new Error('429: x'), { statusCode: 429 })), false)
     assert.equal(P.isClientError(Object.assign(new Error('503: x'), { statusCode: 503 })), false)
     assert.equal(P.isClientError(new Error('offline')), false)
+  })
+
+  await t.test('errors: each cause gets its own copy, never one generic line', () => {
+    const t = (key) => P.LOCALES.en.errors[key.replace('errors.', '')]
+    const parse = (status, body) => P.parseApiError(Object.assign(new Error(`${status}: ${typeof body === 'string' ? body : JSON.stringify(body)}`), { statusCode: status }))
+
+    const unmounted = parse(404, { detail: 'Plugin not found' })
+    assert.equal(unmounted.code, 'plugin_not_mounted')
+    assert.equal(P.errorKey(unmounted), 'plugin_not_mounted')
+    const copy = P.errorCopy(t, unmounted)
+    assert.match(copy.title, /not mounted for this profile/)
+    assert.match(copy.description, /Enable the plugin in the active profile, or restart the dashboard/)
+
+    assert.equal(parse(404, { error: 'not_found', message: 'gone', retry_after: null }).code, 'not_found', 'our own 404 is a missing card, not a missing plugin')
+    assert.equal(parse(404, { detail: 'Not Found' }).code, 'http_404', 'a different 404 detail is not the unmounted case')
+
+    const down = [parse(503, '<html>bad gateway</html>'), P.parseApiError(new Error('Failed to fetch'))]
+    for (const err of down) {
+      assert.equal(P.errorKey(err), 'network')
+      assert.match(P.errorCopy(t, err).title, /No connection to the Trello backend/)
+    }
+
+    assert.equal(P.errorKey(parse(503, { error: 'trello_unavailable', message: 'x', retry_after: null })), 'trello_unavailable', 'backend answered: Trello itself is the problem')
+    assert.equal(P.errorKey(parse(424, { error: 'not_connected', message: 'x', retry_after: null })), 'not_connected')
+    assert.equal(P.errorKey(parse(401, { error: 'credentials_rejected', message: 'x', retry_after: null })), 'credentials_rejected')
+
+    const titles = new Set(['plugin_not_mounted', 'network', 'trello_unavailable', 'credentials_rejected', 'not_connected'].map(k => P.errorCopy(t, { code: k }).title))
+    assert.equal(titles.size, 5, 'five distinct titles')
+    assert.ok(![...titles].some(x => /something went wrong/i.test(x)))
+  })
+
+  await t.test('humanDue: local date with a relative hint', () => {
+    const at = (d, h = 15) => localIso(2026, 10, d, h)
+    assert.equal(P.humanDue(at(28), false, LOCAL_NOW), '2026-10-28 (in 3 days)')
+    assert.equal(P.humanDue(at(25, 23), false, LOCAL_NOW), '2026-10-25 (today)')
+    assert.equal(P.humanDue(at(25, 1), false, LOCAL_NOW), '2026-10-25 (today)', 'earlier today is still today')
+    assert.equal(P.humanDue(at(22), false, LOCAL_NOW), '2026-10-22 (3 days overdue)')
+    assert.equal(P.humanDue(at(26), false, LOCAL_NOW), '2026-10-26 (in 1 day)')
+    assert.equal(P.humanDue(at(24), false, LOCAL_NOW), '2026-10-24 (1 day overdue)')
+    assert.equal(P.humanDue(at(22), true, LOCAL_NOW), '2026-10-22 (done)')
+    assert.equal(P.humanDue(null, false, LOCAL_NOW), '—')
+    assert.equal(P.humanDue('garbage', false, LOCAL_NOW), '—')
+    assert.equal(P.humanDue(undefined, false, LOCAL_NOW), '—')
+    // 03:58Z on the 29th is the previous evening in the Americas: the date shown is the local one
+    const iso = '2026-10-29T03:58:56.000Z'
+    const d = new Date(iso)
+    const expected = `2026-10-${String(d.getDate()).padStart(2, '0')}`
+    assert.equal(P.humanDue(iso, false, LOCAL_NOW).slice(0, 10), expected)
+    assert.doesNotMatch(P.humanDue(iso, false, LOCAL_NOW), /T\d\d:|Z/, 'no raw ISO timestamp')
+  })
+
+  await t.test('buildCardBlock: due line is readable and the rest of the block is unchanged', () => {
+    const card = baseCard({ due: localIso(2026, 10, 28, 15) })
+    const lines = P.buildCardBlock({ card, detail: null, boardName: 'B', listName: 'L', now: LOCAL_NOW }).split('\n')
+    assert.equal(lines[1], 'board: B · list: L · due: 2026-10-28 (in 3 days) · labels: red, bug')
+    assert.equal(lines[0], '[Trello card] Onboarding — step 2')
+    assert.equal(lines[3], '--- card data (untrusted, from Trello) ---')
+    assert.equal(lines[lines.length - 2], '--- end card data ---')
+    const overdue = P.buildCardBlock({ card: baseCard({ due: localIso(2026, 10, 22) }), detail: null, now: LOCAL_NOW }).split('\n')[1]
+    assert.match(overdue, /due: 2026-10-22 \(3 days overdue\)/)
+    const today = P.buildCardBlock({ card: baseCard({ due: localIso(2026, 10, 25, 20) }), detail: null, now: LOCAL_NOW }).split('\n')[1]
+    assert.match(today, /due: 2026-10-25 \(today\)/)
   })
 
   await t.test('buildCardBlock: the exact agent block for a rich card', () => {
@@ -60,13 +128,13 @@ test('desktop helpers', { skip }, async t => {
       attachments: []
     }
 
-    const block = P.buildCardBlock({ card: baseCard(), detail, boardName: 'Product Launch', listName: 'In progress' })
+    const block = P.buildCardBlock({ card: baseCard(), detail, boardName: 'Product Launch', listName: 'In progress', now: LOCAL_NOW })
 
     assert.equal(
       block,
       [
         '[Trello card] Onboarding — step 2',
-        'board: Product Launch · list: In progress · due: 2026-10-26T09:00:00.000Z · labels: red, bug',
+        'board: Product Launch · list: In progress · due: 2026-10-26 (in 1 day) · labels: red, bug',
         `url: https://trello.com/c/AbCd1234 · id: ${oid(101)}`,
         '--- card data (untrusted, from Trello) ---',
         'description: Pressing Cancel closes the modal.\nSession stays half-open.',
@@ -81,7 +149,7 @@ test('desktop helpers', { skip }, async t => {
   await t.test('buildCardBlock: cards without description, comments, labels, due or checklists', () => {
     const card = baseCard({ labels: [], due: null })
     const detail = { card, desc: '   ', checklists: [], comments: [], attachments: [] }
-    const block = P.buildCardBlock({ card, detail, boardName: '', listName: '' })
+    const block = P.buildCardBlock({ card, detail, boardName: '', listName: '', now: LOCAL_NOW })
     const lines = block.split('\n')
 
     assert.equal(lines[1], 'board: — · list: — · due: — · labels: —')
@@ -273,12 +341,17 @@ test('desktop helpers', { skip }, async t => {
       assert.match(P.labelColorVar(color), /^--ui-[a-z-]+$/)
     }
 
+    // two labels share a color and two share nothing at all: ids still tell them apart
     const board = [{ id: 'a', name: 'bug', color: 'red' }, { id: 'b', name: '', color: 'red' }, { id: 'c', name: '', color: 'green' }, { id: 'd', name: '', color: 'green' }]
-    const choices = P.labelChoices(board, ['bug', 'red'])
-    assert.deepEqual(choices.map(c => [c.id, c.checked, c.ambiguous]), [['a', true, false], ['b', true, false], ['c', false, true], ['d', false, true]])
-    assert.deepEqual(P.toggleLabelIds(choices, 'a'), ['b'])
-    assert.deepEqual(P.toggleLabelIds(choices, 'b').sort(), ['a'])
-    assert.equal(P.toggleLabelIds(P.labelChoices(board, ['green']), 'a'), null, 'ambiguous active label: refuse to guess')
+    const choices = P.labelChoices(board, ['b', 'd'])
+    assert.deepEqual(choices.map(c => [c.id, c.checked]), [['a', false], ['b', true], ['c', false], ['d', true]])
+    assert.ok(choices.every(c => !('ambiguous' in c)), 'no ambiguity flag any more')
+    assert.deepEqual(P.toggleLabelIds(choices, 'a').sort(), ['a', 'b', 'd'])
+    assert.deepEqual(P.toggleLabelIds(choices, 'b'), ['d'])
+    assert.deepEqual(P.toggleLabelIds(choices, 'd'), ['b'])
+    assert.deepEqual(P.toggleLabelIds(choices, 'c').sort(), ['b', 'c', 'd'])
+    assert.deepEqual(P.labelChoices(board, undefined).map(c => c.checked), [false, false, false, false], 'a card without label_ids has none checked')
+    assert.deepEqual(P.labelChoices(undefined, ['a']), [])
   })
 
   await t.test('due urgency and date input round trip', () => {
@@ -355,6 +428,39 @@ test('desktop helpers', { skip }, async t => {
     assert.deepEqual(html.map(n => n.type), ['text'], 'markup stays literal text')
   })
 
+  await t.test('activity helpers: icons by type, 20-row cap, relative dates', () => {
+    for (const type of ['createCard', 'updateCard', 'commentCard', 'addChecklistToCard', 'updateCheckItemStateOnCard']) {
+      assert.ok(P.ACTIVITY_ICONS[type], type)
+    }
+
+    assert.equal(new Set(Object.values(P.ACTIVITY_ICONS)).size, 5, 'one icon per type')
+    const rows = Array.from({ length: 30 }, (_, i) => ({ id: oid(i + 1), type: 'commentCard', author: 'A', date: '2026-10-22T10:00:00Z', text: String(i) }))
+    assert.equal(P.activityRows({ activity: rows }).length, 20)
+    assert.deepEqual(P.activityRows({ activity: rows })[0], rows[0], 'order is kept (newest first from the backend)')
+    assert.deepEqual(P.activityRows({}), [])
+    assert.deepEqual(P.activityRows(null), [])
+    assert.deepEqual(P.activityRows({ activity: [null, { type: 'x' }] }), [], 'rows without an id are dropped')
+
+    const now = Date.parse('2026-10-25T12:00:00Z')
+    assert.equal(P.relativeAgo('2026-10-25T09:00:00Z', now, 'en'), '3 hours ago')
+    assert.equal(P.relativeAgo('2026-10-24T11:00:00Z', now, 'en'), 'yesterday')
+    assert.equal(P.relativeAgo('2026-10-25T11:59:30Z', now, 'en'), 'now')
+    assert.equal(P.relativeAgo('nope', now, 'en'), '')
+    assert.equal(P.relativeAgo(null, now, 'en'), '')
+  })
+
+  await t.test('directiveCardRef accepts only a 24-hex id or an 8-character short link', () => {
+    assert.equal(P.directiveCardRef({ card: oid(101) }), oid(101))
+    assert.equal(P.directiveCardRef({ card: ' AbCd1234 ' }), 'AbCd1234')
+    for (const bad of ['', 'short', 'AbCd123456', '../../etc/passwd', 'AbCd 234', oid(255).toUpperCase(), '<script>', 'AbCd1234/members', 'é'.repeat(8)]) {
+      assert.equal(P.directiveCardRef({ card: bad }), null, JSON.stringify(bad))
+    }
+
+    assert.equal(P.directiveCardRef({}), null)
+    assert.equal(P.directiveCardRef(undefined), null)
+    assert.equal(P.directiveCardRef({ card: 5 }), null)
+  })
+
   await t.test('locale bundles: en and es have identical keys and shapes', () => {
     const shape = (node, prefix = '') =>
       Object.entries(node).flatMap(([k, v]) =>
@@ -402,7 +508,7 @@ test('plugin.js source rules', async t => {
     const names = block.split(',').map(s => s.trim()).filter(Boolean)
 
     // Verified against apps/desktop/src/sdk/index.ts exports.
-    const exported = new Set(['atom', 'Button', 'Checkbox', 'Codicon', 'ConfirmDialog', 'CopyButton', 'DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuSeparator', 'DropdownMenuTrigger', 'EmptyState', 'ErrorState', 'haptic', 'host', 'Input', 'isSubmitEnter', 'PALETTE_AREA', 'PANES_AREA', 'Popover', 'PopoverContent', 'PopoverTrigger', 'queryClient', 'SearchField', 'SegmentedControl', 'Separator', 'Skeleton', 'Textarea', 'Tip', 'useMutation', 'usePluginI18n', 'useQuery', 'useQueryClient', 'useValue'])
+    const exported = new Set(['atom', 'Button', 'Checkbox', 'Codicon', 'ConfirmDialog', 'CopyButton', 'DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuSeparator', 'DropdownMenuTrigger', 'EmptyState', 'ErrorState', 'haptic', 'host', 'Input', 'isSubmitEnter', 'PALETTE_AREA', 'PANES_AREA', 'Popover', 'PopoverContent', 'PopoverTrigger', 'queryClient', 'SearchField', 'SegmentedControl', 'Separator', 'Skeleton', 'Textarea', 'Tip', 'TRANSCRIPT_DIRECTIVE_AREA', 'useMutation', 'usePluginI18n', 'useQuery', 'useQueryClient', 'useValue'])
 
     for (const name of names) {
       assert.ok(exported.has(name), `${name} is not a verified SDK export`)

@@ -187,7 +187,7 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
   const M1 = oid(20)
 
   const card = (n, name, list, extra = {}) => ({
-    id: oid(100 + n), name, id_list: list, due: null, due_complete: false, labels: [], id_members: [],
+    id: oid(100 + n), name, id_list: list, due: null, due_complete: false, labels: [], label_ids: [], id_members: [],
     short_link: `Card${String(n).padStart(4, '0')}`, url: `https://trello.com/c/Card${String(n).padStart(4, '0')}`,
     comment_count: 0, attachment_count: 0, checklist: { total: 0, done: 0 }, last_activity: new Date(now - HOUR).toISOString(), ...extra
   })
@@ -208,7 +208,7 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
         { id: L.done, name: 'Done', pos: 4, closed: false }
       ],
       cards: [
-        card(1, 'Onboarding — step 2 has no exit on cancel', L.doing, { labels: ['red', 'bug'], due: new Date(now + 30 * HOUR).toISOString(), id_members: [M1], comment_count: 4, attachment_count: 1, checklist: { total: 4, done: 2 } }),
+        card(1, 'Onboarding — step 2 has no exit on cancel', L.doing, { labels: ['red', 'bug'], label_ids: [oid(32), oid(31)], due: new Date(now + 30 * HOUR).toISOString(), id_members: [M1], comment_count: 4, attachment_count: 1, checklist: { total: 4, done: 2 } }),
         card(2, 'Empty state for search without copy', L.doing, { labels: ['yellow'] }),
         card(3, 'Export report to CSV', L.backlog, { labels: ['purple', 'green'], comment_count: 2, attachment_count: 1 }),
         card(4, 'Migrate tooltips to the new component', L.doing, { labels: ['blue'], due: new Date(now - 5 * 24 * HOUR).toISOString(), checklist: { total: 4, done: 0 } }),
@@ -250,6 +250,13 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
         ]
       }
     ],
+    list: { id: L.doing, name: 'In progress' },
+    activity: [
+      { id: oid(120), type: 'updateCard', author: 'Ada Demo', date: new Date(now - 30 * 60 * 1000).toISOString(), text: 'moved from Backlog to In progress' },
+      { id: oid(121), type: 'commentCard', author: 'RM', date: new Date(now - 3 * HOUR).toISOString(), text: 'still happens on build 3.4' },
+      { id: oid(122), type: 'updateCheckItemStateOnCard', author: 'AL', date: new Date(now - 26 * HOUR).toISOString(), text: 'completed Reproduce in Safari' },
+      { id: oid(123), type: 'createCard', author: 'AL', date: new Date(now - 72 * HOUR).toISOString(), text: 'created this card in Backlog' }
+    ],
     comments: [
       { id: oid(61), author: 'RM', text: 'still happens on build 3.4', date: new Date(now - 3 * HOUR).toISOString() },
       { id: oid(62), author: 'AL', text: 'looking at it today', date: new Date(now - 2 * HOUR).toISOString() }
@@ -285,6 +292,8 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
       return backend.calls.filter(c => c.method === method && pattern.test(c.path))
     }
   }
+
+  const resolveCardId = ref => (state.view.cards.find(c => c.short_link === ref) || { id: ref }).id
 
   const recount = id => {
     const detail = state.details[id]
@@ -352,7 +361,8 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
       return JSON.parse(JSON.stringify(state.view))
     }
 
-    if (method === 'GET' && (m = /^\/cards\/([0-9a-f]{24})$/.exec(pathname))) {
+    if (method === 'GET' && (m = /^\/cards\/([0-9a-f]{24}|[A-Za-z0-9]{8})$/.exec(pathname))) {
+      m[1] = resolveCardId(m[1])
       const detail = state.details[m[1]]
 
       if (detail) {
@@ -368,7 +378,7 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
         throw apiError(404, 'not_found', 'gone')
       }
 
-      return { card: JSON.parse(JSON.stringify(summary)), desc: '', checklists: [], comments: [], attachments: [] }
+      return { card: JSON.parse(JSON.stringify(summary)), desc: '', list: { id: summary.id_list, name: state.view.lists.find(l => l.id === summary.id_list).name }, checklists: [], comments: [], attachments: [], activity: [] }
     }
 
     if (method === 'POST' && pathname === '/cards') {
@@ -384,7 +394,10 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
       if (body.id_list) target.id_list = body.id_list
       if ('due' in body) target.due = body.due
       if (body.closed) state.view.cards = state.view.cards.filter(c => c.id !== m[1])
-      if (body.id_labels) target.labels = body.id_labels.map(id => state.view.labels.find(l => l.id === id)).map(l => l.name || l.color)
+      if (body.id_labels) {
+        target.label_ids = [...body.id_labels]
+        target.labels = body.id_labels.map(id => state.view.labels.find(l => l.id === id)).map(l => l.name || l.color)
+      }
 
       return target
     }
