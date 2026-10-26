@@ -273,9 +273,13 @@ test('desktop helpers', { skip }, async t => {
   })
 
   await t.test('settings, boards and layout helpers', () => {
-    assert.deepEqual(P.normalizeSettings(undefined), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'app' })
-    assert.deepEqual(P.normalizeSettings({ sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'profile' }), { sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'profile' })
-    assert.deepEqual(P.normalizeSettings({ sendMode: 'x', refreshSec: 7, defaultBoard: 5, credentialScope: 'everyone' }), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'app' })
+    assert.deepEqual(P.normalizeSettings(undefined), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile' })
+    assert.deepEqual(P.normalizeSettings({ sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'app' }), { sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'app' })
+    assert.deepEqual(P.normalizeSettings({ sendMode: 'x', refreshSec: 7, defaultBoard: 5, credentialScope: 'everyone' }), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile' })
+    assert.equal(P.DEFAULT_SETTINGS.credentialScope, 'profile', 'the default is one account per profile')
+    assert.equal(P.normalizeSettings({ credentialScope: 'app' }).credentialScope, 'app', 'a stored choice is respected, not migrated')
+    assert.equal(P.normalizeSettings({ credentialScope: 'profile' }).credentialScope, 'profile')
+    assert.equal(P.normalizeSettings({ sendMode: 'submit' }).credentialScope, 'profile', 'settings saved before the scope existed get the default')
     assert.equal(P.normalizeSettings({ refreshSec: 0 }).refreshSec, 0)
 
     const boards = [
@@ -354,29 +358,43 @@ test('desktop helpers', { skip }, async t => {
     assert.deepEqual(P.labelChoices(undefined, ['a']), [])
   })
 
-  await t.test('credentialsView: source, lock and the reconnect hint', () => {
+  await t.test('credentialsView: source, lines, lock, overrides and the reconnect hint', () => {
     const status = (over = {}) => ({ configured: true, source: 'app', active_scope: 'app', env_partial: false, app_file: true, profile_file: false, profile_overrides: false, profile_is_root: false, profile_home: 'home', ...over })
+    const view = (st, chosen) => P.credentialsView(st, chosen)
 
-    assert.equal(P.credentialsView(undefined).state, 'unknown')
-    assert.equal(P.credentialsView(null, 'profile').reconnectFor, null)
-    assert.deepEqual(P.credentialsView(status(), 'app'), { state: 'app', locked: false, reconnectFor: null, profileIsRoot: false })
-    assert.deepEqual(P.credentialsView(status({ source: 'profile', profile_file: true, profile_overrides: true }), 'profile'), { state: 'profile', locked: false, reconnectFor: null, profileIsRoot: false })
-    assert.equal(P.credentialsView(status({ source: null, configured: false, app_file: false }), 'app').state, 'none')
-    assert.equal(P.credentialsView(status({ source: 'weird' }), 'app').state, 'none', 'an unknown source is never shown as a scope')
+    assert.equal(view(undefined).state, 'unknown')
+    assert.equal(view(undefined).line, null)
+    assert.equal(view(null, 'profile').reconnectFor, null)
 
-    // environment decides: locked, and no reconnect hint whatever the files say
-    const env = P.credentialsView(status({ source: 'env', app_file: true }), 'profile')
-    assert.deepEqual([env.state, env.locked, env.reconnectFor], ['env', true, null])
+    // app-wide account in use: the line depends on where the user is looking
+    assert.deepEqual(view(status(), 'app'), { state: 'app', line: 'app', locked: false, connected: true, chosenStored: true, overrides: false, reconnectFor: null, profileIsRoot: false })
+    assert.deepEqual(view(status(), 'profile'), { state: 'app', line: 'appForProfile', locked: false, connected: true, chosenStored: false, overrides: false, reconnectFor: 'profile', profileIsRoot: false })
 
-    // chosen scope empty, the other one stored -> hint names the chosen scope
-    assert.equal(P.credentialsView(status(), 'profile').reconnectFor, 'profile')
-    assert.equal(P.credentialsView(status({ source: 'profile', app_file: false, profile_file: true }), 'app').reconnectFor, 'app')
-    // both stored, or only the chosen one: no hint
-    assert.equal(P.credentialsView(status({ profile_file: true }), 'profile').reconnectFor, null)
-    assert.equal(P.credentialsView(status({ app_file: false, profile_file: true, source: 'profile' }), 'profile').reconnectFor, null)
-    // "this profile" is the app home here: nothing to reconnect, the note explains instead
-    const root = P.credentialsView(status({ profile_is_root: true }), 'profile')
-    assert.deepEqual([root.reconnectFor, root.profileIsRoot], [null, true])
+    // this profile's own file
+    const own = status({ source: 'profile', app_file: false, profile_file: true, profile_overrides: true })
+    assert.deepEqual(view(own, 'profile'), { state: 'profile', line: 'profile', locked: false, connected: true, chosenStored: true, overrides: false, reconnectFor: null, profileIsRoot: false })
+    assert.equal(view(own, 'profile').overrides, false, 'nothing to override when no app-wide account exists')
+    assert.equal(view(own, 'app').reconnectFor, 'app')
+
+    // both stored: the profile file wins and overrides the app-wide account
+    const both = status({ source: 'profile', app_file: true, profile_file: true, profile_overrides: true })
+    assert.equal(view(both, 'profile').overrides, true)
+    assert.equal(view(both, 'app').overrides, true)
+    assert.equal(view(both, 'profile').reconnectFor, null)
+    assert.equal(view(both, 'app').reconnectFor, null)
+
+    // nothing stored
+    const empty = view(status({ source: null, configured: false, app_file: false }), 'profile')
+    assert.deepEqual([empty.state, empty.line, empty.connected, empty.chosenStored], ['none', 'none', false, false])
+    assert.equal(view(status({ source: 'weird' }), 'app').state, 'none', 'an unknown source is never shown as a scope')
+
+    // environment decides: locked, nothing to change, no hint whatever the files say
+    const env = view(status({ source: 'env', app_file: true }), 'profile')
+    assert.deepEqual([env.state, env.line, env.locked, env.connected, env.reconnectFor], ['env', 'env', true, false, null])
+
+    // no home of its own: "this profile" and "all profiles" are the same file
+    const root = view(status({ profile_is_root: true }), 'profile')
+    assert.deepEqual([root.line, root.chosenStored, root.reconnectFor, root.overrides, root.profileIsRoot], ['app', true, null, false, true])
   })
 
   await t.test('due urgency and date input round trip', () => {
@@ -533,7 +551,7 @@ test('plugin.js source rules', async t => {
     const names = block.split(',').map(s => s.trim()).filter(Boolean)
 
     // Verified against apps/desktop/src/sdk/index.ts exports.
-    const exported = new Set(['atom', 'Button', 'Checkbox', 'Codicon', 'ConfirmDialog', 'CopyButton', 'DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuSeparator', 'DropdownMenuTrigger', 'EmptyState', 'ErrorState', 'haptic', 'host', 'Input', 'isSubmitEnter', 'PALETTE_AREA', 'PANES_AREA', 'Popover', 'PopoverContent', 'PopoverTrigger', 'queryClient', 'SearchField', 'SegmentedControl', 'Separator', 'Skeleton', 'Textarea', 'Tip', 'TRANSCRIPT_DIRECTIVE_AREA', 'useMutation', 'usePluginI18n', 'useQuery', 'useQueryClient', 'useValue'])
+    const exported = new Set(['atom', 'Button', 'Checkbox', 'Codicon', 'ConfirmDialog', 'CopyButton', 'Dialog', 'DialogContent', 'DialogDescription', 'DialogHeader', 'DialogTitle', 'DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuSeparator', 'DropdownMenuTrigger', 'EmptyState', 'ErrorState', 'haptic', 'host', 'Input', 'isSubmitEnter', 'PALETTE_AREA', 'PANES_AREA', 'Popover', 'PopoverContent', 'PopoverTrigger', 'queryClient', 'SearchField', 'SegmentedControl', 'Separator', 'Skeleton', 'Textarea', 'Tip', 'TRANSCRIPT_DIRECTIVE_AREA', 'useMutation', 'usePluginI18n', 'useQuery', 'useQueryClient', 'useValue'])
 
     for (const name of names) {
       assert.ok(exported.has(name), `${name} is not a verified SDK export`)
@@ -547,6 +565,7 @@ test('plugin.js source rules', async t => {
     assert.doesNotMatch(code, /['"`:\s]black['"`;\s]|\bwhite\b\s*['"`]/, 'named color')
     assert.doesNotMatch(SOURCE, /dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML/)
     assert.doesNotMatch(SOURCE, /<script/i)
+    assert.doesNotMatch(SOURCE, /printenv|env\s*\|/, 'the admission scan reads "env |" (even in a comment) as an environment dump')
     assert.doesNotMatch(code, /\beval\s*\(|new\s+Function\s*\(/)
     assert.doesNotMatch(code, /\bdocument\.|\bwindow\.|localStorage|sessionStorage|\bfetch\s*\(|XMLHttpRequest|WebSocket/)
     assert.doesNotMatch(code, /setInterval|(?<!ctx\.)setTimeout/, 'no hand-rolled timers or polls (only the scoped ctx.setTimeout)')

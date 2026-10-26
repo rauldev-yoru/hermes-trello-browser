@@ -115,6 +115,27 @@ class MiniQueryClient {
     }
   }
 
+  /** Like React Query: back to the initial state; queries that are on screen fetch again. */
+  resetQueries({ queryKey } = {}) {
+    const work = []
+
+    for (const entry of this.entries.values()) {
+      if (matches(entry.key, queryKey)) {
+        entry.data = undefined
+        entry.error = null
+        entry.status = 'pending'
+        entry.invalidated = false
+        this.notify(entry)
+
+        if (entry.listeners.size && entry.options && entry.options.enabled !== false) {
+          work.push(this.runFetch(entry, entry.options.queryFn))
+        }
+      }
+    }
+
+    return Promise.all(work).then(() => undefined)
+  }
+
   runFetch(entry, fn) {
     if (entry.promise) {
       return entry.promise
@@ -258,7 +279,7 @@ const strip = (props, names) => {
 }
 
 export const Button = ({ children, ...rest }) => e('button', strip(rest, ['variant', 'size', 'asChild']), children)
-export const Tip = ({ children }) => children
+export const Tip = ({ children, label }) => (label && React.isValidElement(children) ? React.cloneElement(children, { 'data-tip': label }) : children)
 export const Codicon = ({ name, spinning, ...rest }) => e('i', { 'data-icon': name, 'data-spinning': spinning ? 'true' : undefined, 'aria-hidden': 'true', ...strip(rest, ['size']) })
 export const Input = props => e('input', strip(props, ['size', 'prefix', 'suffix', 'containerClassName']))
 export const Textarea = props => e('textarea', strip(props, ['size']))
@@ -289,6 +310,12 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, description, ch
 
   return e('div', { role: 'dialog', 'aria-label': String(title) }, e('h2', null, title), description ? e('p', null, description) : null, children, error ? e('div', { role: 'alert' }, error) : null, e('button', { onClick: onClose, type: 'button' }, cancelLabel), e('button', { 'data-confirm': 'true', onClick: confirm, type: 'button' }, confirmLabel))
 }
+
+export const Dialog = ({ open, children }) => (open ? e('div', { 'data-dialog': 'true' }, children) : null)
+export const DialogContent = ({ children, ...rest }) => e('div', { role: 'dialog', ...rest }, children)
+export const DialogHeader = ({ children }) => e('div', null, children)
+export const DialogTitle = ({ children }) => e('h2', null, children)
+export const DialogDescription = ({ children }) => e('p', null, children)
 
 export const DropdownMenu = ({ children }) => e('div', { 'data-menu': 'true' }, children)
 export const DropdownMenuTrigger = ({ children }) => children
