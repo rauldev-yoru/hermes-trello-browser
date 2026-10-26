@@ -97,7 +97,9 @@ const SCENES = [
   // the drawer scrolls inside a 780 px pane; description + checklist + comments + activity need about 1075 px
   { name: 'card-drawer', width: 480, height: 1080 },
   { name: 'directive-chip', width: 560, height: 140 },
-  { name: 'connect', width: 480, height: 560 }
+  { name: 'connect', width: 480, height: 560 },
+  // scroll stress: a tall lane must scroll, and 12 lanes must scroll sideways
+  { name: 'stress', width: 900, height: 600 }
 ]
 
 const only = args.only ? new Set(args.only.split(',').map(s => s.trim()).filter(Boolean)) : null
@@ -403,12 +405,12 @@ const $ = (root, selector) => root.querySelector(selector)
 const $$ = (root, selector) => [...root.querySelectorAll(selector)]
 const text = el => (el.textContent || '').replace(/\s+/g, ' ').trim()
 
-async function withPane(width, drive, { connected = true } = {}) {
+async function withPane(width, drive, { connected = true, fixture = applyFixture } = {}) {
   sdk.queryClient.reset()
   sdk.host.paneVisible.set(true)
 
   const backend = makeBackend({ connected })
-  if (connected) applyFixture(backend)
+  if (connected) fixture(backend)
   const ctx = makeCtx(sdk, backend)
   plugin.default.register(ctx)
 
@@ -422,6 +424,27 @@ async function withPane(width, drive, { connected = true } = {}) {
   } finally {
     await ui.unmount()
   }
+}
+
+/** Many lanes and a lane with many cards: the two cases a real work board hits. */
+function applyStressFixture(backend) {
+  const { state } = backend
+  const B1 = backend.ids.B1
+  const lists = Array.from({ length: 12 }, (_, i) => ({ id: oid(200 + i), name: `Lane ${i + 1}`, pos: i + 1, closed: false }))
+  const card = (n, list) => ({
+    id: oid(400 + n), name: `Card ${String(n).padStart(2, '0')} — a reasonably long title that wraps`, id_list: list,
+    due: null, due_complete: false, labels: [], label_ids: [], id_members: [],
+    short_link: `Str${String(n).padStart(5, '0')}`, url: `https://trello.com/c/Str${String(n).padStart(5, '0')}`,
+    comment_count: n % 3, attachment_count: 0, checklist: { total: n % 4, done: n % 2 }, last_activity: iso(-2 * HOUR)
+  })
+  const cards = []
+  for (let n = 1; n <= 30; n += 1) cards.push(card(n, lists[0].id))
+  for (let i = 1; i < lists.length; i += 1) {
+    for (let n = 0; n < 3; n += 1) cards.push(card(100 + i * 10 + n, lists[i].id))
+  }
+  state.boards = [{ id: B1, name: 'Stress board', url: 'https://trello.com/b/strEss01', closed: false, starred: true }]
+  state.view = { board: state.boards[0], lists, cards, members: [], labels: [] }
+  state.details = {}
 }
 
 const goToList = async (root, name) => {
@@ -442,6 +465,8 @@ const RENDERERS = {
     }),
 
   'pane-columns': () => withPane(1280, async () => {}),
+
+  stress: () => withPane(900, async () => {}, { fixture: applyStressFixture }),
 
   connect: () =>
     withPane(480, async ({ root }) => {

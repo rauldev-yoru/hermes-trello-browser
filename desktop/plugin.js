@@ -1614,7 +1614,7 @@ function CardRow({ card, view, actions }) {
       'data-selected': selected ? 'true' : 'false',
       onMouseEnter: () => setHot(true),
       onMouseLeave: () => setHot(false),
-      style: st(FILL, { gap: '0.375rem', border: `1px solid ${selected ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'}`, borderRadius: '8px', padding: '0.5rem 0.625rem', background: selected ? mix('--ui-accent', 8) : 'var(--ui-bg-tertiary)' })
+      style: st(FILL, { flexShrink: 0, gap: '0.375rem', border: `1px solid ${selected ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'}`, borderRadius: '8px', padding: '0.5rem 0.625rem', background: selected ? mix('--ui-accent', 8) : 'var(--ui-bg-tertiary)' })
     },
     h(
       'button',
@@ -1701,13 +1701,55 @@ function ListFocus({ view, actions }) {
   )
 }
 
+/** A plain mouse wheel over the board scrolls it sideways; a lane that can still scroll vertically keeps the wheel. */
+function useWheelScrollX(ref) {
+  useEffect(() => {
+    const el = ref.current
+    if (!el) {
+      return undefined
+    }
+
+    const onWheel = event => {
+      if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) {
+        return
+      }
+
+      const target = event.target
+      const lane = target && target.closest ? target.closest('[data-trello="lane-body"]') : null
+
+      if (lane && lane.scrollHeight > lane.clientHeight + 1) {
+        const down = event.deltaY > 0
+        const atEnd = lane.scrollTop + lane.clientHeight >= lane.scrollHeight - 1
+
+        if (!(down ? atEnd : lane.scrollTop <= 0)) {
+          return
+        }
+      }
+
+      if (el.scrollWidth <= el.clientWidth) {
+        return
+      }
+
+      event.preventDefault()
+      el.scrollLeft += event.deltaY
+    }
+
+    el.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [ref])
+
+  return ref
+}
+
 function Columns({ view, actions, width }) {
   const grouped = cardsByList(view)
   const w = laneWidth(width, view.lists.length)
+  const scrollRef = useWheelScrollX(useRef(null))
 
   return h(
     'div',
-    { 'data-trello': 'columns', style: st({ flex: 1, minHeight: 0, display: 'flex', gap: '0.625rem', padding: '0.75rem', overflowX: 'auto', alignItems: 'stretch' }) },
+    { 'data-trello': 'columns', ref: scrollRef, style: st({ flex: 1, minHeight: 0, display: 'flex', gap: '0.625rem', padding: '0.75rem', overflowX: 'auto', overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', alignItems: 'stretch' }) },
     ...view.lists.map(l => {
       const cards = grouped.get(l.id) || []
 
@@ -1715,7 +1757,7 @@ function Columns({ view, actions, width }) {
         'section',
         { key: l.id, 'data-trello': 'lane', 'data-lane-width': w, style: st(FILL, { flex: '0 0 auto', width: `${w}px`, border: HAIRLINE, borderRadius: '9px', background: mix('--ui-text-primary', 4) }) },
         h('header', { style: st(ROW, { justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 1, padding: '0.5rem 0.625rem', fontSize: '0.75rem', background: 'var(--ui-bg-elevated)', borderBottom: HAIRLINE, borderRadius: '9px 9px 0 0' }) }, h('b', { className: 'truncate', style: { fontWeight: 600 } }, l.name), h('span', { style: st(MUTED, { fontVariantNumeric: 'tabular-nums' }) }, cards.length)),
-        h('div', { style: st(FILL, { flex: 1, overflowY: 'auto', padding: '0.5rem', gap: '0.4375rem' }) }, ...cards.map(c => h(CardRow, { key: c.id, card: c, view, actions })), h(AddCard, { listId: l.id, actions }))
+        h('div', { 'data-trello': 'lane-body', style: st(FILL, { flex: 1, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', padding: '0.5rem', gap: '0.4375rem' }) }, ...cards.map(c => h(CardRow, { key: c.id, card: c, view, actions })), h(AddCard, { listId: l.id, actions }))
       )
     })
   )

@@ -794,6 +794,46 @@ test('desktop pane render harness', { skip }, async t => {
     await none.unmount()
   })
 
+  await scenario('layout: the board scrolls sideways on a plain wheel, a tall lane keeps it', { width: 1200 }, async ({ root }) => {
+    const columns = $(root, '[data-trello="columns"]')
+    const laneBody = $(root, '[data-trello="lane-body"]')
+    assert.ok(columns && laneBody, 'columns and lane body exist')
+
+    // jsdom has no layout: drive the two measurements the handler reads.
+    let scrolled = null
+    Object.defineProperty(columns, 'scrollLeft', { get: () => scrolled ?? 0, set: v => { scrolled = v }, configurable: true })
+    Object.defineProperty(columns, 'scrollWidth', { value: 1200, configurable: true })
+    Object.defineProperty(columns, 'clientWidth', { value: 480, configurable: true })
+    Object.defineProperty(laneBody, 'scrollHeight', { value: 900, configurable: true })
+    Object.defineProperty(laneBody, 'clientHeight', { value: 300, configurable: true })
+    Object.defineProperty(laneBody, 'scrollTop', { value: 0, writable: true, configurable: true })
+
+    // jsdom has no WheelEvent: a plain Event carrying the two deltas the handler reads
+    const wheel = deltaY => {
+      const event = new Event('wheel', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'deltaY', { value: deltaY })
+      Object.defineProperty(event, 'deltaX', { value: 0 })
+      return event
+    }
+
+    // a wheel over a lane that can still scroll down stays vertical
+    const inLane = wheel(120)
+    laneBody.dispatchEvent(inLane)
+    assert.equal(scrolled, null, 'the lane keeps the wheel while it can scroll')
+    assert.equal(inLane.defaultPrevented, false)
+
+    // at the bottom of the lane the same wheel moves the board sideways
+    laneBody.scrollTop = 600
+    const atEnd = wheel(120)
+    laneBody.dispatchEvent(atEnd)
+    assert.equal(scrolled, 120, 'the board scrolls horizontally at the end of a lane')
+    assert.equal(atEnd.defaultPrevented, true)
+
+    // and the styling that makes a scrollable lane possible is in place
+    assert.match(laneBody.getAttribute('style') || '', /overflow-y:\s*auto/)
+    assert.match(columns.getAttribute('style') || '', /overflow-x:\s*auto/)
+  })
+
   await scenario('directive: a failing backend leaves the plain chip and the message intact', { setup: b => { b.failWhen((m, p) => /^\/cards\//.test(p), raw(503, '<html>x</html>')) } }, async ({ ctx }) => {
     const ui = await chip(ctx, { card: 'Card0001' })
     assert.ok($(ui.container, '[data-trello="chip-plain"]'))
