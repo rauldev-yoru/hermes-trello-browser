@@ -308,6 +308,33 @@ Impact is a judgment; the other numbers are measurements.
 - Riesgo: high. Variable-height windowing without a library is easy to get subtly wrong; `scrollIntoView` for `j`/`k` on a card that is not mounted, the sticky lane header, find-in-page, selection and the open drawer must all survive; keyboard and focus order change. Every existing layout test queries cards that would no longer exist.
 - Evidencia: `--measure` DOM table; the cost only matters at much larger boards than the fixture, which is why it is last.
 
+### P11 — Markdown: quotes, tables, rules, strike, nested and task lists, autolinks
+- Estado: implementado en SHA. Measured on the 29-line showcase description (`markdown-showcase.png`): the old parser produced 10 blocks of which 3 were paragraphs showing raw markup (20 `|`, 2 `~~`, 2 `>`, 1 `---`, 1 `:--` left on screen, the bare URL and both images reduced to a `!`); the new one renders quote, table, rule, nested list, task boxes, strike, autolink and both images, and no markup character is left in a paragraph. Parser cost: 10 000 characters of each of 24 pathological patterns (48 inputs, with and without line breaks) parse in at most 1.6 ms; on 7 input shapes a 4× longer text takes 1.7 to 6.6× the time (a quadratic parser would take 16×), 64 000 repetitions parse in 6 to 128 ms.
+- Síntoma: owners write descriptions with structure that the pane shows as text with symbols (medición: 20 raw `|`, 2 `~~`, 2 `>` and a `---` on screen for one 29-line description; images invisible).
+- Propuesta: extend the hand-written parser (no dependency, no HTML) with `>` quotes, `---` / `***` rules, GFM tables with alignment, `~~strike~~`, two-level lists with task boxes, bare-URL links and backslash escapes; marker lookups are memoized so the parser stays linear on hostile input.
+- Mejora esperada: 0 raw markup characters left in a paragraph for the supported syntax; tables scroll on their own instead of breaking the drawer width.
+- Esfuerzo: M
+- Riesgo: a hand parser has edge cases CommonMark does not (setext headings, link reference definitions, HTML blocks, nested emphasis across lines are not supported and render as text); intraword `_` is not emphasis by design; a table needs its delimiter row with the same number of columns as the header.
+- Evidencia: `markdown-showcase.png`; `tests/desktop/markdown.test.mjs` (blocks, inlines, malformed input, 400 random strings, timing).
+
+### P12 — Images and attachments: previews with a consent rule
+- Estado: implementado en SHA. Measured: the backend now sends `thumb_url` / `width` / `height` / `is_image` per attachment; an image attachment is a 4 rem thumbnail row (the attachments section went from 136 to 250 px on the heavy card, which gained one Trello image and one external image: 6 → 6 rows, one of them 64 px tall and one with a consent chip). Markdown images from Trello hosts render inline (max 20 rem tall); every other host stays a chip until Load image: opening the heavy drawer and the showcase makes 0 requests to non-Trello hosts (asserted on every `<img>` in the drawer).
+- Síntoma: attachments are names with an icon, images in descriptions are invisible (`![alt](url)` shows as `!`), and there is no way to see a picture without leaving the pane (medición: 6 attachments in 136 px of text rows; 2 inline images lost in the showcase).
+- Propuesta: the backend adds `thumb_url` (the smallest of Trello's `previews`), its `width` / `height` and `is_image`; the pane draws image attachments as 4 rem thumbnails with name and size, `loading="lazy"`, no referrer, click opens the original with the OS handler. In markdown, `imagePolicy(url)` allows only https Trello hosts to load by themselves; anything else is a chip `🖼 alt · host` with **Load image** and *open in browser*.
+- Mejora esperada: pictures visible where they are written, zero requests to third parties until the reader asks.
+- Esfuerzo: M
+- Riesgo: whether Trello's own picture URLs load without the browser's Trello session depends on the board's privacy and cannot be checked from here (the fallbacks are the icon and the chip); a thumbnail is a request to Trello when the row nears the screen; the host allowlist must track Trello's real CDN hosts.
+- Evidencia: `attachments-preview.png`, `markdown-showcase.png`; `tests/test_trello_client.py::test_attachment_thumbnails`; `tests/desktop/markdown.test.mjs` (`imagePolicy`, consent flow, no third-party `<img>`).
+
+### P13 — Checklist legibility: visible boxes and rows
+- Estado: implementado en SHA. Measured (contrast computed from the stylesheet's values against the drawer background): empty box border 1.07:1 → 5.2:1 on the dark theme and 3.8:1 on the light one (3:1 is the WCAG minimum for non-text); done text 5.2:1 / 3.8:1. Rows grew from 24 to 29 px, so the heavy checklists section went from 1,830 to 2,180 px (1,206 to 1,416 px with Pending only) and the drawer from 587 to 610 nodes.
+- Síntoma: an unticked box has almost no border (medición: 1.07:1 against the drawer on the dark theme) and items are 24 px rows with no separation, so a checklist reads as a block of text.
+- Propuesta: a 1.5 px border in the ink colour at 54% and a theme fill on the empty box (darker on hover and focus), the accent look kept when ticked; each item gets 4 px of padding, a hairline under it and a tint under the pointer or focus; done items are struck through in the tertiary text colour. The Pending only box gets the same border.
+- Mejora esperada: every item is a distinct, scannable row; the cost is +5 px per row.
+- Esfuerzo: S
+- Riesgo: the fill and border use the app's `--ui-*` variables and were checked on the stylesheet's default (light) values and the dark preset, not on every theme the app ships; the longer checklists section weakens the P8 height figures by about 19%.
+- Evidencia: `heavy-drawer-checklists.png` (dark), `heavy-drawer-checklists-light.png`; `tests/desktop/markdown.test.mjs` (M3).
+
 ### How the proposals relate
 
 **Mutually exclusive**
@@ -321,7 +348,7 @@ Impact is a judgment; the other numbers are measurements.
 - **P4 + P6.** The lane strip is the natural place for `matches / total` per lane; a filter hides cards, the strip tells where the matches are.
 - **P7 + P8 + P3.** All three edit the drawer: the section tabs carry the counts (`Checklists 24/60`, `Comments 12`), "pending only" and the comment window change what those counts mean, and the footer's second row is shared space.
 
-**Independent**: P1, P2, P3 and P9 touch separate pieces and can be taken in any order.
+**Independent**: P1, P2, P3 and P9 touch separate pieces and can be taken in any order. P11, P12 and P13 edit separate pieces too (the markdown renderer, the attachment rows and the item row); P11 and P12 share the image rule (`imagePolicy`) and were built together.
 
 **Suggested waves** (judgment, not a measurement): A = P1 + P2 (no visible change, safe); B = P4 + P5 + P9 (navigation and density: what the user asked for); C = P7 + P8 + P3 (drawer); D = P6 (filters). P10 stays on the shelf.
 

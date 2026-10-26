@@ -262,9 +262,37 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(
             detail["attachments"][0],
             {"id": oid(50), "name": "spec.pdf", "url": "https://example.invalid/spec.pdf",
-             "is_upload": True, "bytes": 1234, "mime": "application/pdf"},
+             "is_upload": True, "bytes": 1234, "mime": "application/pdf",
+             "thumb_url": None, "width": None, "height": None, "is_image": False},
         )
         self.assertIsNone(detail["attachments"][1]["url"], "non-http(s) attachment URLs are dropped")
+
+    def test_attachment_thumbnails(self):
+        previews = [
+            {"id": oid(71), "url": "https://example.invalid/p/600.png", "width": 600, "height": 400, "bytes": 9000, "scaled": True},
+            {"id": oid(72), "url": "https://example.invalid/p/150.png", "width": 150, "height": 100, "bytes": 900, "scaled": True},
+            {"id": oid(73), "url": "https://example.invalid/p/300.png", "width": 300, "height": 200, "bytes": 3000, "scaled": True},
+        ]
+        photo = C.normalize_attachment({"id": oid(50), "name": "shot.png", "url": "https://example.invalid/shot.png", "bytes": 5000,
+                                        "mimeType": "image/png", "isUpload": True, "previews": previews})
+        # the smallest preview is the thumbnail, whatever the order Trello lists them in
+        self.assertEqual((photo["thumb_url"], photo["width"], photo["height"]), ("https://example.invalid/p/150.png", 150, 100))
+        self.assertIs(photo["is_image"], True)
+        self.assertEqual(photo["url"], "https://example.invalid/shot.png", "the original stays the original")
+
+        plain = C.normalize_attachment({"id": oid(51), "name": "spec.pdf", "url": "https://example.invalid/spec.pdf", "mimeType": "application/pdf"})
+        self.assertEqual((plain["thumb_url"], plain["width"], plain["height"], plain["is_image"]), (None, None, None, False))
+
+        # an image without previews (a link to a picture) is still an image; one with previews but an odd mime too
+        self.assertIs(C.normalize_attachment({"id": oid(52), "mimeType": "IMAGE/JPEG"})["is_image"], True)
+        self.assertIs(C.normalize_attachment({"id": oid(53), "previews": previews[:1]})["is_image"], True)
+
+        # unsafe or malformed previews never reach the front end
+        odd = C.normalize_attachment({"id": oid(54), "mimeType": "image/gif", "previews": [
+            {"url": "javascript:alert(1)", "width": 10, "height": 10}, "junk", None, {"url": "https://example.invalid/ok.gif", "width": "wide", "height": True}]})
+        self.assertEqual((odd["thumb_url"], odd["width"], odd["height"]), ("https://example.invalid/ok.gif", None, None))
+        self.assertIsNone(C.normalize_attachment({"id": oid(55), "previews": [{"url": "data:image/png;base64,AAAA", "width": 5}]})["thumb_url"])
+        self.assertIsNone(C.normalize_attachment({"id": oid(56), "previews": "nope"})["thumb_url"])
 
     def test_label_ids_follow_the_labels(self):
         card = C.normalize_card(raw_card(10, labels=[

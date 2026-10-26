@@ -606,15 +606,40 @@ def normalize_activity(raw):
     }
 
 
+def _smallest_preview(raw):
+    """The smallest (1x) preview Trello made for an attachment, or None. Entries without a usable URL are skipped."""
+    previews = raw.get("previews")
+    best = None
+    for preview in previews if isinstance(previews, list) else []:
+        if not isinstance(preview, dict) or _safe_url(preview.get("url")) is None:
+            continue
+        width = preview.get("width")
+        width = width if isinstance(width, int) and not isinstance(width, bool) and width > 0 else None
+        if best is None or (width or 10**9) < (best[1] or 10**9):
+            best = (preview, width)
+    return best[0] if best else None
+
+
+def _dimension(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def normalize_attachment(raw):
+    """One attachment. ``thumb_url`` / ``width`` / ``height`` describe the smallest preview (the thumbnail), not the original."""
     size = raw.get("bytes")
+    mime = _str(raw.get("mimeType")) or None
+    preview = _smallest_preview(raw)
     return {
         "id": _str(raw.get("id")),
         "name": _str(raw.get("name")),
         "url": _safe_url(raw.get("url")),
         "is_upload": bool(raw.get("isUpload")),
         "bytes": size if isinstance(size, int) else None,
-        "mime": _str(raw.get("mimeType")) or None,
+        "mime": mime,
+        "thumb_url": _safe_url(preview.get("url")) if preview else None,
+        "width": _dimension(preview.get("width")) if preview else None,
+        "height": _dimension(preview.get("height")) if preview else None,
+        "is_image": bool(mime and mime.lower().startswith("image/")) or preview is not None,
     }
 
 
@@ -1003,7 +1028,7 @@ class TrelloClient:
                 "checklists": "all",
                 "checklist_fields": "name,pos,idCard",
                 "attachments": "true",
-                "attachment_fields": "name,url,bytes,mimeType,isUpload",
+                "attachment_fields": "name,url,bytes,mimeType,isUpload,previews",
                 "list": "true",
                 "list_fields": "name",
                 "board": "true",
@@ -1067,7 +1092,7 @@ class TrelloClient:
             raw = self._call(
                 "card_attachments",
                 {"card": card_id},
-                {"fields": "name,url,bytes,mimeType,isUpload"},
+                {"fields": "name,url,bytes,mimeType,isUpload,previews"},
             )
             return [normalize_attachment(a) for a in (raw or []) if isinstance(a, dict)]
 

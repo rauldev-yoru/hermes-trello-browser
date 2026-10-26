@@ -310,7 +310,8 @@ class PluginApiTests(unittest.TestCase):
         self.assertEqual(self.get(f"/cards/{CARD_1}/activity").json(), [])
         self.assertEqual(
             self.get(f"/cards/{CARD_1}/attachments").json(),
-            [{"id": oid(50), "name": "a", "url": "https://example.invalid/a", "is_upload": False, "bytes": 5, "mime": "text/plain"}],
+            [{"id": oid(50), "name": "a", "url": "https://example.invalid/a", "is_upload": False, "bytes": 5, "mime": "text/plain",
+              "thumb_url": None, "width": None, "height": None, "is_image": False}],
         )
 
     # -- writes -------------------------------------------------------------

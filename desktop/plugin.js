@@ -211,7 +211,11 @@ const EN = {
     pendingOnly: 'Pending only',
     allDone: 'Every item is done.',
     confirmDelete: 'Delete this item?',
-    confirmDeleteYes: 'Delete'
+    confirmDeleteYes: 'Delete',
+    image: 'image',
+    loadImage: 'Load image',
+    openInBrowser: 'open in browser',
+    imageFailed: 'Could not load the image.'
   },
   send: {
     inserted: 'Card inserted into the composer.',
@@ -386,7 +390,11 @@ const ES = {
     pendingOnly: 'Solo pendientes',
     allDone: 'Todos los ítems están listos.',
     confirmDelete: '¿Borrar este ítem?',
-    confirmDeleteYes: 'Borrar'
+    confirmDeleteYes: 'Borrar',
+    image: 'imagen',
+    loadImage: 'Cargar imagen',
+    openInBrowser: 'abrir en el navegador',
+    imageFailed: 'No se pudo cargar la imagen.'
   },
   send: {
     inserted: 'Card insertada en el compositor.',
@@ -839,6 +847,42 @@ export function visibleChecklistItems(items, pendingOnly, pinned) {
   return pendingOnly ? items.filter(i => i.state !== 'complete' || (pinned && pinned.has(i.id))) : items
 }
 
+/** `482113` -> `471 KB`: one decimal below 10, none above. */
+export function formatBytes(bytes) {
+  const n = bytes === null || bytes === undefined || bytes === '' ? NaN : Number(bytes)
+
+  if (!Number.isFinite(n) || n < 0) {
+    return ''
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = n
+  let unit = 0
+
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+
+  return `${unit === 0 || value >= 10 ? Math.round(value) : Math.round(value * 10) / 10} ${units[unit]}`
+}
+
+/**
+ * The URL a thumbnail may load by itself: the preview Trello made (when it is on a Trello host), else the original of
+ * an image on a Trello host. Anything else is `null`: the row shows an icon and, for an image, a Load image button.
+ */
+export function attachmentThumbSource(att) {
+  const thumb = att && att.thumb_url ? imagePolicy(att.thumb_url) : null
+
+  if (thumb && thumb.trusted) {
+    return thumb.url
+  }
+
+  const original = att && att.is_image && att.url ? imagePolicy(att.url) : null
+
+  return original && original.trusted ? original.url : null
+}
+
 /** Do all the lanes fit side by side in the container (lane widths + 10 px gaps + 12 px padding on each side)? */
 export function lanesFit(containerWidth, laneCount) {
   const n = Math.max(0, Math.floor(Number(laneCount) || 0))
@@ -1167,11 +1211,124 @@ export function withViewChecklist(view, cardId, checklist) {
 }
 
 // -- markdown subset ---------------------------------------------------------
+//
+// A safe subset, hand-parsed (no dependency, no HTML ever): blocks are paragraphs, headings, fenced code, quotes,
+// rules, GFM tables and lists (two levels, task items); inlines are code, bold, italic, strike, links, images and
+// bare URLs. Input of any shape never throws, and the work is linear in the size of the text: block rules look at
+// one or two lines, and inline markers are looked up with memoized `indexOf` calls (a closer's validity does not
+// depend on its opener, so a failed search is never repeated).
 
-const ITEM_RE = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/
+const ITEM_RE = /^(\s*)(?:([-*+])|(\d+)[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/
+const HEADING_RE = /^(#{1,6})\s+(.*)$/
+const RULE_RE = /^ {0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/
+const QUOTE_RE = /^ {0,3}>/
+const ALIGN_CELL_RE = /^:?-+:?$/
 
-export function parseMarkdown(text) {
-  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n')
+/** Quotes inside quotes stop being parsed at this depth (the text stays visible). */
+const MAX_BLOCK_DEPTH = 3
+/** `**a _b `c`_**`: spans inside spans stop being parsed at this depth. */
+const MAX_INLINE_DEPTH = 4
+
+const indentWidth = ws => ws.replace(/\t/g, '    ').length
+
+/** Cells of one table row. `\|` is a literal pipe; a leading and a trailing pipe are decoration. */
+function splitRow(line) {
+  let s = line.trim()
+
+  if (s.startsWith('|')) {
+    s = s.slice(1)
+  }
+
+  const trailing = s.endsWith('|') && !s.endsWith('\\|')
+  const cells = []
+  let cur = ''
+
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i]
+
+    if (c === '\\' && s[i + 1] === '|') {
+      cur += '|'
+      i += 1
+    } else if (c === '|') {
+      cells.push(cur.trim())
+      cur = ''
+    } else {
+      cur += c
+    }
+  }
+
+  if (!trailing) {
+    cells.push(cur.trim())
+  }
+
+  return cells
+}
+
+/** The alignment of each column when `line` is a GFM delimiter row with `columns` cells, else null. */
+function alignmentRow(line, columns) {
+  if (!line.includes('-') || !line.includes('|')) {
+    return null
+  }
+
+  const cells = splitRow(line)
+
+  if (cells.length !== columns || !cells.every(c => ALIGN_CELL_RE.test(c))) {
+    return null
+  }
+
+  return cells.map(c => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : null))
+}
+
+function parseList(lines, from) {
+  const entries = []
+  let i = from
+
+  while (i < lines.length) {
+    let m = ITEM_RE.exec(lines[i])
+
+    // one blank line inside a list does not end it when the next line is another item
+    if (!m && !lines[i].trim() && i + 1 < lines.length && !RULE_RE.test(lines[i + 1])) {
+      const after = ITEM_RE.exec(lines[i + 1])
+
+      // ... unless the kind changes (bullets, then numbers): that is a new list
+      if (after && entries.length && (after[2] === undefined) === entries[0].ordered) {
+        i += 1
+        m = after
+      }
+    }
+
+    if (!m) {
+      break
+    }
+
+    entries.push({ indent: indentWidth(m[1]), ordered: m[2] === undefined, num: m[3], checked: m[4] === undefined ? null : m[4].toLowerCase() === 'x', text: m[5] })
+    i += 1
+  }
+
+  const base = entries[0].indent
+  const list = { type: 'list', ordered: entries[0].ordered, items: [] }
+
+  if (list.ordered && entries[0].num !== undefined) {
+    list.start = Math.min(Number(entries[0].num), 999999)
+  }
+
+  for (const e of entries) {
+    const item = { checked: e.checked, text: e.text }
+    const last = list.items[list.items.length - 1]
+
+    // two or more spaces deeper than the list: a sub-list of the previous item (a third level is flattened into it)
+    if (e.indent >= base + 2 && last) {
+      last.sub = last.sub || { type: 'list', ordered: e.ordered, items: [] }
+      last.sub.items.push(item)
+    } else {
+      list.items.push(item)
+    }
+  }
+
+  return { list, next: i }
+}
+
+function parseBlocks(lines, depth) {
   const blocks = []
   let para = []
   let i = 0
@@ -1202,27 +1359,57 @@ export function parseMarkdown(text) {
       continue
     }
 
-    if (ITEM_RE.test(line)) {
+    if (RULE_RE.test(line)) {
       flush()
-      const ordered = /^\s*\d/.test(line)
-      const items = []
-
-      while (i < lines.length) {
-        const m = ITEM_RE.exec(lines[i])
-
-        if (!m) {
-          break
-        }
-
-        items.push({ checked: m[1] === undefined ? null : m[1].toLowerCase() === 'x', text: m[2] })
-        i += 1
-      }
-
-      blocks.push({ type: 'list', ordered, items })
+      blocks.push({ type: 'hr' })
+      i += 1
       continue
     }
 
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
+    if (QUOTE_RE.test(line)) {
+      flush()
+      const inner = []
+
+      while (i < lines.length && QUOTE_RE.test(lines[i])) {
+        inner.push(lines[i].replace(/^ {0,3}> ?/, ''))
+        i += 1
+      }
+
+      blocks.push({ type: 'quote', blocks: depth + 1 < MAX_BLOCK_DEPTH ? parseBlocks(inner, depth + 1) : [{ type: 'p', text: inner.join('\n') }] })
+      continue
+    }
+
+    if (line.includes('|') && i + 1 < lines.length) {
+      const header = splitRow(line)
+      const align = alignmentRow(lines[i + 1], header.length)
+
+      if (align) {
+        flush()
+        const rows = []
+        i += 2
+
+        while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+          const cells = splitRow(lines[i])
+
+          // uneven rows are padded or cut to the header's width
+          rows.push(Array.from({ length: header.length }, (_, c) => cells[c] ?? ''))
+          i += 1
+        }
+
+        blocks.push({ type: 'table', align, header, rows })
+        continue
+      }
+    }
+
+    if (ITEM_RE.test(line)) {
+      flush()
+      const { list, next } = parseList(lines, i)
+      blocks.push(list)
+      i = next
+      continue
+    }
+
+    const heading = HEADING_RE.exec(line)
 
     if (heading) {
       flush()
@@ -1245,6 +1432,10 @@ export function parseMarkdown(text) {
   return blocks
 }
 
+export function parseMarkdown(text) {
+  return parseBlocks(String(text ?? '').replace(/\r\n?/g, '\n').split('\n'), 0)
+}
+
 /** Only http(s) and mailto links ever become clickable. */
 export function safeUrl(url) {
   const raw = String(url ?? '').trim()
@@ -1262,44 +1453,289 @@ export function safeUrl(url) {
   }
 }
 
-const INLINE_RE =
-  /`([^`\n]+)`|\*\*([^*\n]+?)\*\*|__([^_\n]+?)__|\*([^*\s][^*\n]*?)\*|(?<![\w])_([^_\s][^_\n]*?)_(?![\w])|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]*[^\s<>().,;:!?'"])/g
+// -- images: what may load by itself -------------------------------------------
 
-export function parseInline(text) {
-  const src = String(text ?? '')
+/** Hosts whose images load without asking: Trello's own (attachments, previews, avatars). Everything else asks first. */
+const TRELLO_IMAGE_HOSTS = Object.freeze(['trello.com', 'trello-attachments.com', 'trello-attachments.s3.amazonaws.com'])
+
+/**
+ * Decide what an image URL may do. `null` when it is not an http(s) URL (nothing is ever loaded from it). Otherwise
+ * the parsed host and whether it is a Trello host served over https, which is the only case that loads by itself:
+ * a description or a comment must not make the pane call a third party just by being opened.
+ */
+export function imagePolicy(url) {
+  const raw = safeUrl(url)
+
+  if (!raw || !/^https?:/i.test(raw)) {
+    return null
+  }
+
+  let parsed
+
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return null
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
+
+  if (!host) {
+    return null
+  }
+
+  const trelloHost = TRELLO_IMAGE_HOSTS.some(h => host === h || host.endsWith(`.${h}`))
+  // https only, and no credentials in the URL: `https://trello.com@elsewhere/` parses to the host `elsewhere`, but be strict anyway
+  const trusted = trelloHost && parsed.protocol === 'https:' && !parsed.username && !parsed.password
+
+  return { url: raw, host, trusted }
+}
+
+// -- inline ------------------------------------------------------------------------
+
+const isSpace = ch => ch === undefined || /\s/.test(ch)
+const isWordChar = ch => ch !== undefined && /[\p{L}\p{N}]/u.test(ch)
+const ESCAPABLE = '\\`*_{}[]()#+-.!~|>'
+
+/** One line of inline markup. Never crosses a newline; `depth` limits spans inside spans. */
+function parseInlineLine(src, depth) {
   const out = []
-  let last = 0
-  const re = new RegExp(INLINE_RE.source, 'g')
-  let m = re.exec(src)
+  const n = src.length
+  const memo = new Map()
+  const dead = new Set()
+  let text = ''
+  let i = 0
 
-  while (m) {
-    if (m.index > last) {
-      out.push({ type: 'text', text: src.slice(last, m.index) })
+  const flushText = () => {
+    if (text) {
+      out.push({ type: 'text', text })
+      text = ''
     }
-
-    if (m[1] !== undefined) {
-      out.push({ type: 'code', text: m[1] })
-    } else if (m[2] !== undefined || m[3] !== undefined) {
-      out.push({ type: 'bold', children: parseInline(m[2] ?? m[3]) })
-    } else if (m[4] !== undefined || m[5] !== undefined) {
-      out.push({ type: 'italic', children: parseInline(m[4] ?? m[5]) })
-    } else if (m[6] !== undefined) {
-      const url = safeUrl(m[7])
-      out.push(url ? { type: 'link', url, text: m[6] } : { type: 'text', text: m[6] })
-    } else if (m[8] !== undefined) {
-      const url = safeUrl(m[8])
-      out.push(url ? { type: 'link', url, text: m[8] } : { type: 'text', text: m[8] })
-    }
-
-    last = m.index + m[0].length
-    m = re.exec(src)
   }
 
-  if (last < src.length) {
-    out.push({ type: 'text', text: src.slice(last) })
+  // first index of `needle` at or after `from`; remembers the last answer so repeated misses cost nothing
+  const next = (needle, from) => {
+    const m = memo.get(needle)
+
+    if (m && m.from <= from && (m.idx === -1 || m.idx >= from)) {
+      return m.idx
+    }
+
+    const idx = src.indexOf(needle, from)
+    memo.set(needle, { from, idx })
+
+    return idx
   }
+
+  // first doubled marker (`**`, `__`, `~~`) at or after `from`
+  const nextPair = (ch, from) => {
+    let j = next(ch, from)
+
+    while (j !== -1 && src[j + 1] !== ch) {
+      j = next(ch, j + 1)
+    }
+
+    return j
+  }
+
+  // first single marker that can close an emphasis opened before `from`
+  const nextSingle = (ch, from) => {
+    let j = next(ch, from)
+
+    while (j !== -1) {
+      const before = src[j - 1]
+      const after = src[j + 1]
+      const spaced = isSpace(before)
+      const doubled = before === ch || after === ch
+      const wordy = ch === '_' && isWordChar(after)
+
+      if (!spaced && !doubled && !wordy) {
+        return j
+      }
+
+      j = next(ch, j + 1)
+    }
+
+    return -1
+  }
+
+  const nested = content => (depth + 1 > MAX_INLINE_DEPTH ? [{ type: 'text', text: content }] : parseInlineLine(content, depth + 1))
+
+  // `[label](url)` starting at the `[` in `open`
+  const readLink = open => {
+    const close = next(']', open + 1)
+
+    if (close <= open + 1 || src[close + 1] !== '(') {
+      return null
+    }
+
+    const end = next(')', close + 2)
+
+    if (end <= close + 2) {
+      return null
+    }
+
+    const url = src.slice(close + 2, end)
+
+    return /\s/.test(url) ? null : { label: src.slice(open + 1, close), url, end: end + 1 }
+  }
+
+  while (i < n) {
+    const c = src[i]
+
+    if (c === '\\' && i + 1 < n && ESCAPABLE.includes(src[i + 1])) {
+      text += src[i + 1]
+      i += 2
+      continue
+    }
+
+    if (c === '`') {
+      const j = next('`', i + 1)
+
+      if (j > i + 1) {
+        flushText()
+        out.push({ type: 'code', text: src.slice(i + 1, j) })
+        i = j + 1
+        continue
+      }
+    }
+
+    if (c === '!' && src[i + 1] === '[') {
+      const link = readLink(i + 1)
+
+      if (link) {
+        flushText()
+        out.push(imagePolicy(link.url) ? { type: 'image', alt: link.label, url: link.url } : { type: 'text', text: link.label })
+        i = link.end
+        continue
+      }
+    }
+
+    if (c === '[') {
+      const link = readLink(i)
+
+      if (link) {
+        flushText()
+        const url = safeUrl(link.url)
+        out.push(url ? { type: 'link', url, text: link.label } : { type: 'text', text: link.label })
+        i = link.end
+        continue
+      }
+    }
+
+    if (c === 'h' && (src.startsWith('http://', i) || src.startsWith('https://', i)) && !isWordChar(src[i - 1])) {
+      let end = i
+
+      while (end < n && !/[\s<>()]/.test(src[end])) {
+        end += 1
+      }
+
+      while (end > i && /[.,;:!?'"]/.test(src[end - 1])) {
+        end -= 1
+      }
+
+      const url = end - i > 8 ? safeUrl(src.slice(i, end)) : null
+
+      if (url) {
+        flushText()
+        out.push({ type: 'link', url, text: url })
+        i = end
+        continue
+      }
+    }
+
+    if (c === '~' && src[i + 1] === '~') {
+      const j = nextPair('~', i + 2)
+
+      if (j > i + 2) {
+        flushText()
+        out.push({ type: 'strike', children: nested(src.slice(i + 2, j)) })
+        i = j + 2
+        continue
+      }
+
+      text += '~~'
+      i += 2
+      continue
+    }
+
+    if ((c === '*' || c === '_') && (c === '*' || !isWordChar(src[i - 1]))) {
+      // `***both***`
+      if (src[i + 1] === c && src[i + 2] === c) {
+        const j = next(c.repeat(3), i + 3)
+
+        if (j > i + 3) {
+          flushText()
+          out.push({ type: 'bold', children: [{ type: 'italic', children: nested(src.slice(i + 3, j)) }] })
+          i = j + 3
+          continue
+        }
+      }
+
+      if (src[i + 1] === c) {
+        const j = nextPair(c, i + 2)
+
+        if (j > i + 2 && (c === '*' || !isWordChar(src[j + 2]))) {
+          flushText()
+          out.push({ type: 'bold', children: nested(src.slice(i + 2, j)) })
+          i = j + 2
+          continue
+        }
+
+        // an unclosed `**` stays as text, and its second star does not open an emphasis
+        text += c + c
+        i += 2
+        continue
+      }
+
+      if (!isSpace(src[i + 1]) && !dead.has(c)) {
+        const j = nextSingle(c, i + 2)
+
+        if (j > i + 1) {
+          flushText()
+          out.push({ type: 'italic', children: nested(src.slice(i + 1, j)) })
+          i = j + 1
+          continue
+        }
+
+        dead.add(c)
+      }
+    }
+
+    text += c
+    i += 1
+  }
+
+  flushText()
 
   return out
+}
+
+export function parseInline(text) {
+  const out = []
+
+  String(text ?? '')
+    .split('\n')
+    .forEach((line, index) => {
+      if (index > 0) {
+        out.push({ type: 'text', text: '\n' })
+      }
+
+      out.push(...parseInlineLine(line, 0))
+    })
+
+  // adjacent text nodes (a line break, an escaped character) read as one
+  return out.reduce((merged, node) => {
+    const last = merged[merged.length - 1]
+
+    if (node.type === 'text' && last && last.type === 'text') {
+      last.text += node.text
+    } else {
+      merged.push(node)
+    }
+
+    return merged
+  }, [])
 }
 
 export function isTypingTarget(el) {
@@ -1658,6 +2094,39 @@ function openLink(url) {
   RT.ctx.os.openExternal(url)
 }
 
+/**
+ * An image from markdown or an attachment. A Trello-hosted one loads by itself (lazily, without a referrer); any other
+ * host shows a chip with the host and loads only after the reader presses Load image, so opening a card never makes
+ * the pane call a third party. Load failures fall back to the chip's link.
+ */
+function MdImage({ alt, url }) {
+  const t = usePluginI18n(ID)
+  const policy = imagePolicy(url)
+  const [loaded, setLoaded] = useState(Boolean(policy && policy.trusted))
+  const [failed, setFailed] = useState(false)
+
+  if (!policy) {
+    return h('span', null, alt)
+  }
+
+  const open = () => openLink(policy.url)
+  const label = `${alt || t('drawer.image')} · ${policy.host}`
+
+  if (loaded && !failed) {
+    return h('img', { alt, 'data-trello': 'md-image', decoding: 'async', loading: 'lazy', onClick: open, onError: () => setFailed(true), referrerPolicy: 'no-referrer', src: policy.url, style: { display: 'block', maxWidth: '100%', maxHeight: '20rem', height: 'auto', objectFit: 'contain', borderRadius: '6px', cursor: 'pointer' }, title: label })
+  }
+
+  return h(
+    'span',
+    { 'data-trello': 'image-chip', style: st(ROW, SMALL, { display: 'inline-flex', flexWrap: 'wrap', gap: '0.375rem', maxWidth: '100%', border: HAIRLINE, borderRadius: '6px', padding: '0.125rem 0.375rem', background: 'var(--ui-bg-tertiary)', verticalAlign: 'middle' }) },
+    h('span', { style: { flex: '1 1 100%', minWidth: 0, overflowWrap: 'anywhere' }, title: label }, h('span', { 'aria-hidden': true }, '🖼 '), label),
+    failed
+      ? h('span', { style: MUTED }, t('drawer.imageFailed'))
+      : h(Button, { 'data-trello': 'image-load', onClick: () => setLoaded(true), size: 'xs', type: 'button', variant: 'outline' }, t('drawer.loadImage')),
+    h('a', { href: policy.url, onClick: e => { e.preventDefault(); open() }, rel: 'noreferrer noopener', style: { color: 'var(--ui-accent)', cursor: 'pointer' } }, t('drawer.openInBrowser'))
+  )
+}
+
 function renderInline(nodes, prefix) {
   return nodes.map((n, i) => {
     const key = `${prefix}${i}`
@@ -1678,6 +2147,14 @@ function renderInline(nodes, prefix) {
       return h('em', { key }, ...renderInline(n.children, `${key}.`))
     }
 
+    if (n.type === 'strike') {
+      return h('s', { key, style: { color: 'var(--ui-text-tertiary)' } }, ...renderInline(n.children, `${key}.`))
+    }
+
+    if (n.type === 'image') {
+      return h(MdImage, { key, alt: n.alt, url: n.url })
+    }
+
     return h(
       'a',
       {
@@ -1692,6 +2169,72 @@ function renderInline(nodes, prefix) {
       },
       n.text
     )
+  })
+}
+
+/** A list, two levels deep at most: bullets, circles, numbers, letters; task items show a read-only box. */
+function renderList(list, prefix, level) {
+  const ordered = list.ordered
+  const tag = ordered ? 'ol' : 'ul'
+
+  return h(
+    tag,
+    { key: prefix, ...(ordered && list.start > 1 ? { start: list.start } : null), style: { margin: 0, paddingLeft: '1.25rem', listStyleType: ordered ? (level === 0 ? 'decimal' : 'lower-alpha') : level === 0 ? 'disc' : 'circle' } },
+    ...list.items.map((item, j) =>
+      h(
+        'li',
+        { key: j, style: st({ marginBottom: '0.125rem' }, item.checked === null ? null : { listStyleType: 'none', marginLeft: '-1.25rem' }) },
+        item.checked !== null && h('span', { 'aria-checked': item.checked, 'aria-readonly': true, 'data-state': item.checked ? 'complete' : 'incomplete', 'data-trello': 'md-task', role: 'checkbox', style: { marginRight: '0.375rem', color: item.checked ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)' } }, item.checked ? '☑' : '☐'),
+        ...renderInline(parseInline(item.text), `${prefix}${j}.`),
+        item.sub && renderList(item.sub, `${prefix}${j}s`, level + 1)
+      )
+    )
+  )
+}
+
+function renderBlocks(blocks, prefix) {
+  return blocks.map((b, i) => {
+    const key = `${prefix}${i}`
+
+    if (b.type === 'code') {
+      return h('pre', { key, style: { margin: 0, padding: '0.5rem', background: 'var(--ui-bg-tertiary)', borderRadius: '6px', fontFamily: 'ui-monospace, monospace', fontSize: '0.6875rem', overflowX: 'auto', whiteSpace: 'pre' } }, b.text)
+    }
+
+    if (b.type === 'heading') {
+      const look = HEADING_LOOK[Math.min(Math.max(Number(b.level) || 1, 1), 6) - 1]
+
+      return h('div', { key, role: 'heading', 'aria-level': b.level, 'data-level': b.level, style: { fontWeight: look.weight, fontSize: look.size, lineHeight: look.line, marginTop: look.top } }, ...renderInline(parseInline(b.text), `${key}h.`))
+    }
+
+    if (b.type === 'hr') {
+      return h('hr', { key, style: { width: '100%', margin: '0.25rem 0', border: 0, borderTop: '1px solid var(--ui-text-quaternary)' } })
+    }
+
+    if (b.type === 'quote') {
+      return h('blockquote', { key, 'data-trello': 'md-quote', style: st(FILL, { gap: '0.375rem', margin: 0, padding: '0.125rem 0 0.125rem 0.625rem', borderLeft: '3px solid var(--ui-text-quaternary)', color: 'var(--ui-text-secondary)' }) }, ...renderBlocks(b.blocks, `${key}q`))
+    }
+
+    if (b.type === 'table') {
+      const cell = (text, c, tag, r) => h(tag, { key: c, ...(tag === 'th' ? { scope: 'col' } : null), style: { textAlign: b.align[c] || 'left', padding: '0.25rem 0.5rem', border: HAIRLINE, verticalAlign: 'top', fontWeight: tag === 'th' ? 600 : 400, background: tag === 'th' ? 'var(--ui-bg-tertiary)' : 'transparent' } }, ...renderInline(parseInline(text), `${key}t${r}.${c}.`))
+
+      // a table wider than the drawer scrolls on its own; words are not broken, so the columns keep their width
+      return h(
+        'div',
+        { key, 'data-trello': 'md-table', style: { maxWidth: '100%', overflowX: 'auto' } },
+        h(
+          'table',
+          { style: { borderCollapse: 'collapse', fontSize: '0.75rem', overflowWrap: 'normal', wordBreak: 'normal' } },
+          h('thead', null, h('tr', null, ...b.header.map((text, c) => cell(text, c, 'th', 'h')))),
+          h('tbody', null, ...b.rows.map((row, r) => h('tr', { key: r }, ...row.map((text, c) => cell(text, c, 'td', r)))))
+        )
+      )
+    }
+
+    if (b.type === 'list') {
+      return renderList(b, key, 0)
+    }
+
+    return h('div', { key, style: { whiteSpace: 'pre-wrap' } }, ...renderInline(parseInline(b.text), `${key}p.`))
   })
 }
 
@@ -1710,38 +2253,7 @@ const HEADING_LOOK = Object.freeze([
 const Markdown = memo(function Markdown({ text }) {
   const blocks = parseMarkdown(text)
 
-  return h(
-    'div',
-    { 'data-trello': 'markdown', style: st(FILL, { gap: '0.5rem', overflowWrap: 'anywhere' }) },
-    ...blocks.map((b, i) => {
-      if (b.type === 'code') {
-        return h('pre', { key: i, style: { margin: 0, padding: '0.5rem', background: 'var(--ui-bg-tertiary)', borderRadius: '6px', fontFamily: 'ui-monospace, monospace', fontSize: '0.6875rem', overflowX: 'auto', whiteSpace: 'pre' } }, b.text)
-      }
-
-      if (b.type === 'heading') {
-        const look = HEADING_LOOK[Math.min(Math.max(Number(b.level) || 1, 1), 6) - 1]
-
-        return h('div', { key: i, role: 'heading', 'aria-level': b.level, 'data-level': b.level, style: { fontWeight: look.weight, fontSize: look.size, lineHeight: look.line, marginTop: look.top } }, ...renderInline(parseInline(b.text), `h${i}.`))
-      }
-
-      if (b.type === 'list') {
-        return h(
-          'ul',
-          { key: i, style: { margin: 0, paddingLeft: b.items.some(x => x.checked !== null) ? 0 : '1.1rem', listStyle: b.items.some(x => x.checked !== null) ? 'none' : b.ordered ? 'decimal' : 'disc' } },
-          ...b.items.map((item, j) =>
-            h(
-              'li',
-              { key: j, style: { marginBottom: '0.125rem' } },
-              item.checked !== null && h('span', { 'aria-hidden': true, style: { marginRight: '0.375rem' } }, item.checked ? '☑' : '☐'),
-              ...renderInline(parseInline(item.text), `l${i}.${j}.`)
-            )
-          )
-        )
-      }
-
-      return h('div', { key: i, style: { whiteSpace: 'pre-wrap' } }, ...renderInline(parseInline(b.text), `p${i}.`))
-    })
-  )
+  return h('div', { 'data-trello': 'markdown', style: st(FILL, { gap: '0.5rem', overflowWrap: 'anywhere' }) }, ...renderBlocks(blocks, ''))
 })
 
 // -- small pieces -----------------------------------------------------------
@@ -2576,6 +3088,16 @@ function InlineAdd({ label, placeholder, onSubmit, busy }) {
 }
 
 /** An icon button the size of the row's text line, so showing it never makes the row taller. */
+/**
+ * The item checkbox. A ticked one keeps the theme's accent; an empty one gets a real border (the ink colour at 54%,
+ * which reads on a dark and on a light theme alike, unlike the faint stroke the SDK box uses) and a darker one on
+ * hover or focus. 1rem square, nudged to sit on the first text line.
+ */
+const CHECK_BOX = Object.freeze({ width: '1rem', height: '1rem', minWidth: '1rem', marginTop: '0.125rem', flexShrink: 0 })
+// longhands only: hover swaps the colour, and clearing a longhand next to a `border` shorthand would wipe the whole border
+const CHECK_BOX_EMPTY = Object.freeze({ borderWidth: '1.5px', borderStyle: 'solid', borderColor: 'var(--ui-text-tertiary)', background: 'var(--ui-bg-secondary)' })
+const CHECK_BOX_HOVER = Object.freeze({ borderColor: 'var(--ui-text-secondary)' })
+
 const ITEM_TILE = Object.freeze({ width: '1.25rem', height: '1.25rem', minWidth: '1.25rem', padding: 0 })
 
 /**
@@ -2632,12 +3154,13 @@ const ItemRow = memo(function ItemRow({ cardId, checklistId, item, itemActions }
         setHot(false)
         setTapped(false)
       },
-      style: st(ROW, { alignItems: 'center', minHeight: '1.5rem' })
+      // a row of its own: padding, a hairline under it, a tint under the pointer or the keyboard focus
+      style: st(ROW, { alignItems: 'flex-start', padding: '0.25rem 0.375rem', borderBottom: HAIRLINE, borderRadius: '4px', background: hot || focused ? mix('--ui-accent', 7) : 'transparent' })
     },
-    h(Checkbox, { 'aria-label': item.name, checked: done, onCheckedChange: value => itemActions.toggle(cardId, checklistId, item.id, value ? 'complete' : 'incomplete') }),
+    h(Checkbox, { 'aria-label': item.name, checked: done, onCheckedChange: value => itemActions.toggle(cardId, checklistId, item.id, value ? 'complete' : 'incomplete'), style: st(CHECK_BOX, done ? null : CHECK_BOX_EMPTY, !done && (hot || focused) ? CHECK_BOX_HOVER : null) }),
     editing
       ? h(Input, { autoFocus: true, 'aria-label': t('drawer.renameItem'), onBlur: save, onChange: e => setDraft(e.target.value), onKeyDown: e => { if (isSubmitEnter(e)) save(); else if (e.key === 'Escape') { setDraft(item.name); setEditing(false) } }, value: draft })
-      : h('span', { onClick: () => setTapped(v => !v), onDoubleClick: startEdit, style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere', cursor: 'text', textDecoration: done ? 'line-through' : 'none', color: done ? 'var(--ui-text-tertiary)' : 'inherit' } }, item.name),
+      : h('span', { onClick: () => setTapped(v => !v), onDoubleClick: startEdit, style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere', cursor: 'text', fontSize: '0.8125rem', lineHeight: '1.25rem', textDecoration: done ? 'line-through' : 'none', color: done ? 'var(--ui-text-tertiary)' : 'inherit' } }, item.name),
     showTools &&
       h(
         'span',
@@ -2755,7 +3278,7 @@ function ChecklistSection({ detail, cardId, actions, pendingOnly, onPendingOnly 
       'div',
       { style: st(ROW, { justifyContent: 'space-between' }) },
       h(SectionTitle, null, t('drawer.checklists')),
-      detail.checklists.length > 0 && h('label', { 'data-trello': 'pending-only', style: st(ROW, SMALL, MUTED, { gap: '0.25rem', cursor: 'pointer' }) }, h(Checkbox, { 'aria-label': t('drawer.pendingOnly'), checked: pendingOnly, onCheckedChange: value => onPendingOnly(Boolean(value)) }), t('drawer.pendingOnly'))
+      detail.checklists.length > 0 && h('label', { 'data-trello': 'pending-only', style: st(ROW, SMALL, MUTED, { gap: '0.25rem', cursor: 'pointer' }) }, h(Checkbox, { 'aria-label': t('drawer.pendingOnly'), checked: pendingOnly, onCheckedChange: value => onPendingOnly(Boolean(value)), style: pendingOnly ? undefined : st({ width: '1rem', height: '1rem' }, CHECK_BOX_EMPTY) }), t('drawer.pendingOnly'))
     ),
     detail.checklists.length === 0 && h('div', { style: st(MUTED, SMALL) }, t('drawer.noChecklists')),
     ...detail.checklists.map(cl => h(ChecklistBlock, { key: cl.id, actions, cardId, checklist: cl, itemActions, pendingOnly, pinned })),
@@ -2841,6 +3364,49 @@ function CommentsSection({ detail, cardId, card, actions }) {
   )
 }
 
+/** The 4rem thumbnail of an image attachment; an icon while it is not loaded, if it cannot be, or if it is not Trello's to load. */
+function AttachmentThumb({ att }) {
+  const src = attachmentThumbSource(att)
+  const [failed, setFailed] = useState(false)
+
+  return h(
+    'span',
+    { 'data-trello': 'attachment-thumb', style: { display: 'grid', placeItems: 'center', flexShrink: 0, width: '4rem', height: '4rem', overflow: 'hidden', borderRadius: '6px', border: HAIRLINE, background: 'var(--ui-bg-tertiary)', color: 'var(--ui-text-tertiary)' } },
+    src && !failed
+      ? h('img', { alt: '', decoding: 'async', height: att.height || undefined, loading: 'lazy', onError: () => setFailed(true), referrerPolicy: 'no-referrer', src, style: { width: '100%', height: '100%', objectFit: 'cover' }, width: att.width || undefined })
+      : h(Codicon, { name: 'file-media' })
+  )
+}
+
+function AttachmentRow({ att }) {
+  const t = usePluginI18n(ID)
+  const name = att.name || att.url || '?'
+  const size = formatBytes(att.bytes)
+  const open = e => { e.preventDefault(); openLink(att.url) }
+  const link = att.url ? h('a', { 'aria-label': `${t('drawer.openAttachment')}: ${name}`, className: 'truncate', href: att.url, onClick: open, rel: 'noreferrer noopener', style: { color: 'var(--ui-accent)', cursor: 'pointer', minWidth: 0 }, title: name }, name) : h('span', { className: 'truncate', title: name }, name)
+  const meta = size && h('span', { style: st(MUTED, SMALL, { flexShrink: 0 }) }, size)
+
+  // an image Trello can show: thumbnail, name and size; click opens the original
+  if (att.is_image && attachmentThumbSource(att)) {
+    const thumb = h(AttachmentThumb, { att })
+
+    return h(
+      'div',
+      { 'data-trello': 'attachment', 'data-kind': 'image', style: st(ROW, { gap: '0.625rem' }) },
+      att.url ? h('a', { 'aria-hidden': true, href: att.url, onClick: open, rel: 'noreferrer noopener', style: { display: 'flex', cursor: 'pointer' }, tabIndex: -1 }, thumb) : thumb,
+      h('div', { style: st(FILL, { flex: 1, minWidth: 0, gap: '0.125rem' }) }, link, meta)
+    )
+  }
+
+  // any other file, or an image from a host that has to be asked first: icon, link, size (and the consent chip)
+  return h(
+    'div',
+    { 'data-trello': 'attachment', 'data-kind': att.is_image ? 'image-external' : 'file', style: st(FILL, { gap: '0.25rem' }) },
+    h('div', { style: st(ROW, { gap: '0.375rem' }) }, h(Codicon, { name: att.is_image ? 'file-media' : 'file' }), link, h('span', { style: { flex: 1 } }), meta),
+    att.is_image && att.url && imagePolicy(att.url) && h(MdImage, { alt: name, url: att.url })
+  )
+}
+
 function AttachmentsSection({ detail }) {
   const t = usePluginI18n(ID)
 
@@ -2849,16 +3415,7 @@ function AttachmentsSection({ detail }) {
     { 'data-trello': 'attachments' },
     h(SectionTitle, null, t('drawer.attachments')),
     detail.attachments.length === 0 && h('div', { style: st(MUTED, SMALL) }, t('drawer.noAttachments')),
-    ...detail.attachments.map(a =>
-      h(
-        'div',
-        { key: a.id, style: st(ROW, { justifyContent: 'space-between' }) },
-        a.url
-          ? h('a', { 'aria-label': `${t('drawer.openAttachment')}: ${a.name || a.url}`, className: 'truncate', href: a.url, onClick: e => { e.preventDefault(); openLink(a.url) }, rel: 'noreferrer noopener', style: { color: 'var(--ui-accent)', cursor: 'pointer', minWidth: 0 }, title: a.name || a.url }, a.name || a.url)
-          : h('span', { className: 'truncate' }, a.name || '?'),
-        a.url && h(Codicon, { name: 'link-external' })
-      )
-    )
+    h('div', { style: st(FILL, { gap: '0.5rem' }) }, ...detail.attachments.map(a => h(AttachmentRow, { key: a.id, att: a })))
   )
 }
 

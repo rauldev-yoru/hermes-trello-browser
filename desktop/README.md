@@ -74,6 +74,34 @@ chat.
   **Delete asks inline first** (`Delete this item?` with Delete / Cancel; focus starts on Cancel, Escape
   cancels). An undo toast was rejected: undo can only re-create the item (new position, ticked state
   lost) and relies on the host showing toasts with actions; asking first loses nothing.
+- **Markdown.** Descriptions and comments are parsed by hand into React elements (never an HTML string).
+  Blocks: paragraphs (line breaks kept), headings `#`..`######`, fenced code, `>` quotes (up to three
+  levels), `---` / `***` rules, GFM tables (header, `:--` `:-:` `--:` alignment, uneven rows padded or cut,
+  wide tables scroll on their own) and lists up to two levels deep (the second level indented two or more
+  spaces; a third is flattened into it) with task items `- [ ]` / `- [x]` drawn as read-only boxes.
+  Inlines: `code`, **bold**, *italic*, ~~strike~~, `[links]()`, bare `https://` URLs, backslash escapes
+  and images. Only `http(s)` and `mailto:` links are clickable. Malformed input never throws and the parser
+  is linear (marker lookups are memoized; nothing backtracks), which `markdown.test.mjs` checks with 10 000
+  characters of every nasty pattern.
+- **Images.** `imagePolicy(url)` decides what may load: `null` when the scheme is not http(s); otherwise the
+  host and whether it is a Trello host over https (`trello.com`, `trello-attachments.com`,
+  `trello-attachments.s3.amazonaws.com` and their subdomains, no credentials in the URL). A Trello-hosted
+  image in markdown renders inline (lazy, no referrer, at most 20 rem tall, click opens the original in the OS
+  handler). Any other host shows a chip `host + alt` with **Load image** and an *open in browser* link, and
+  nothing is requested until the reader presses the button, so a description cannot make the pane call a
+  third party by being opened. A picture that fails to load falls back to the chip (markdown) or to the
+  icon (attachments). Whether Trello's own picture URLs load without the browser's Trello session depends on
+  the board's privacy; that is not something this pane can check, hence the fallbacks.
+- **Attachments.** An image Trello made a preview of is a row with a 4 rem thumbnail (the backend's
+  `thumb_url`, the smallest preview), name and size; a click opens the original. Other files are an icon, a
+  link and a size. An image from a non-Trello host is an icon row plus the same consent chip. Thumbnails are
+  `loading="lazy"`, so they are fetched when the row is near the screen.
+- **Checklist rows.** Each item is a row of its own (4 px padding, a hairline under it, a tint under the
+  pointer or the keyboard focus). The empty box has a 1.5 px border in the theme's ink colour at 54%
+  (`--ui-text-tertiary`), so it reads on a dark and on a light theme, a darker one on hover or focus; a ticked
+  box keeps the theme accent. A done item is struck through and drawn in the tertiary text colour. Contrast against
+  the drawer background (computed from the stylesheet's values): empty box border 5.2:1 dark and 3.8:1 light
+  (the SDK box it replaces had a 1.07:1 border on the dark theme); done text 5.2:1 and 3.8:1.
 - **Comments.** The composer and the 3 newest comments (newest first by date); `Show N more` reveals the
   rest of what the API already returned, with no new request. A comment longer than 6 lines is
   clamped with its own `Show more`. The backend returns at most 20 comments and cannot say whether

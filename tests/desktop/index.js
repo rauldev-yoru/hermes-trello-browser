@@ -6,3 +6,4 @@
 import('./helpers.test.mjs')
   .then(() => import('./render.test.mjs'))
   .then(() => import('./heavy-board.test.mjs'))
+  .then(() => import('./markdown.test.mjs'))

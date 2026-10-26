@@ -22,7 +22,8 @@
 //   --out <dir>             (default docs/screenshots)
 //   --only <name>[,<name>]  render a subset: pane-list, pane-columns, card-drawer, directive-chip, connect, stress,
 //                           heavy-columns, heavy-compact, heavy-list, heavy-drawer, heavy-drawer-checklists,
-//                           heavy-drawer-pending, drawer-sections, heavy-4-lanes
+//                           heavy-drawer-pending, drawer-sections, heavy-4-lanes, markdown-showcase,
+//                           attachments-preview, heavy-drawer-checklists-light
 //   --keep-html <dir>       also write the intermediate HTML pages there (debugging)
 //   --allow-missing-font    continue without the icon font (icons render as empty boxes)
 //   --measure               do not write images: measure DOM size, render counts, drawer cost and real-Chromium
@@ -124,7 +125,13 @@ const SCENES = [
   // the drawer scrolled to the comments (the Comments tab lit): the section tabs, the three latest comments, Show more
   { name: 'drawer-sections', width: 520, height: 1100, scrollTo: '[data-trello="drawer"] [data-trello="comments"]' },
   // a heavy board whose 4 lanes fit the pane: no lane strip
-  { name: 'heavy-4-lanes', width: 1280, height: 720 }
+  { name: 'heavy-4-lanes', width: 1280, height: 720 },
+  // a description that uses every markdown block and inline the pane understands, with a Trello image and a chip
+  { name: 'markdown-showcase', width: 520, height: 900, scrollTo: '[data-trello="drawer"] [data-trello="description"]' },
+  // the attachments: a thumbnail row, file rows, and an image from another host that asks before loading
+  { name: 'attachments-preview', width: 520, height: 600, scrollTo: '[data-trello="drawer"] [data-trello="attachments"]' },
+  // the checklists on the light theme (the others render on the dark one)
+  { name: 'heavy-drawer-checklists-light', width: 520, height: 1100, scrollTo: '[data-trello="drawer"] [data-trello="checklists"]', theme: 'light' }
 ]
 
 const only = args.only ? new Set(args.only.split(',').map(s => s.trim()).filter(Boolean)) : null
@@ -175,7 +182,7 @@ if (!chromium || !fs.existsSync(chromium)) {
   fail(3, 'Chromium not found: install it, or pass --chromium <file> / set TRELLO_CHROMIUM')
 }
 
-const { findNodeModules, SKIP_REASON, makeBackend, makeCtx, setupDom, oid, COUNT_SHIM, applyHeavyFixture: heavyFixture } = await import(pathToFileURL(path.join(ROOT, 'tests', 'desktop', 'harness.mjs')).href)
+const { findNodeModules, SKIP_REASON, makeBackend, makeCtx, setupDom, oid, COUNT_SHIM, applyHeavyFixture: heavyFixture, applyShowcaseFixture: showcaseFixture } = await import(pathToFileURL(path.join(ROOT, 'tests', 'desktop', 'harness.mjs')).href)
 const modules = findNodeModules()
 
 if (!modules) {
@@ -425,11 +432,13 @@ const THEME_VARS = {
 // is re-added inline) so Chromium never goes looking for them.
 const appCss = css.replace(/@font-face\{[^}]*\}/g, '') + fontCss
 
-function page({ width, height, body, extraCss = '' }) {
-  const vars = Object.entries(THEME_VARS).map(([k, v]) => `${k}:${v}`).join(';')
+function page({ width, height, body, extraCss = '', theme = 'dark' }) {
+  // dark: the "nous" colours below; light: the stylesheet's own defaults (:root is the light theme)
+  const light = theme === 'light'
+  const vars = light ? '' : Object.entries(THEME_VARS).map(([k, v]) => `${k}:${v}`).join(';')
 
   return `<!doctype html>
-<html lang="en" class="dark" data-hermes-theme="nous" data-hermes-mode="dark" style="color-scheme:dark;${vars}">
+<html lang="en" class="${light ? 'light' : 'dark'}" data-hermes-theme="nous" data-hermes-mode="${light ? 'light' : 'dark'}" style="color-scheme:${light ? 'light' : 'dark'};${vars}">
 <head><meta charset="utf-8"><title>screenshot</title><style>${appCss}</style>${extraCss ? `<style>${extraCss}</style>` : ''}</head>
 <body><div id="root"><div style="width:${width}px;height:${height}px;overflow:hidden;position:relative">${body}</div></div></body>
 </html>
@@ -455,6 +464,28 @@ const $ = (root, selector) => root.querySelector(selector)
 const $$ = (root, selector) => [...root.querySelectorAll(selector)]
 const text = el => (el.textContent || '').replace(/\s+/g, ' ').trim()
 
+/**
+ * The renders are offline. The pane loads Trello-hosted images by itself, which would show broken pictures here, so
+ * each of those <img> gets a small synthetic picture (an inline SVG) instead. Other hosts are never touched: the pane
+ * does not load them either until the reader asks, and the scenes show them as the chips they are.
+ */
+function offlineImages(html) {
+  return html.replace(/(<img\b[^>]*?\bsrc=")([^"]+)(")/g, (all, head, url, tail) => {
+    const policy = plugin.imagePolicy(url.replace(/&amp;/g, '&'))
+
+    if (!policy || !policy.trusted) {
+      return all
+    }
+
+    const thumb = policy.url.includes('/previews/')
+    const [w, h] = thumb ? [150, 100] : [640, 240]
+    const wave = (phase, amp, color) => `<polyline fill="none" stroke="${color}" stroke-width="${thumb ? 3 : 4}" points="${Array.from({ length: 33 }, (_, i) => `${(i * w) / 32},${h * 0.55 + Math.sin(i / 3 + phase) * h * amp}`).join(' ')}"/>`
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1d2e4f"/><stop offset="1" stop-color="#0d1117"/></linearGradient></defs><rect width="${w}" height="${h}" fill="url(#g)"/>${wave(0, 0.18, '#4a84fe')}${wave(1.7, 0.12, '#55a583')}${wave(3.1, 0.08, '#e75e78')}</svg>`
+
+    return `${head}data:image/svg+xml;utf8,${encodeURIComponent(svg)}${tail}`
+  })
+}
+
 async function withPane(width, drive, { connected = true, fixture = applyFixture, settings = null } = {}) {
   sdk.queryClient.reset()
   sdk.host.paneVisible.set(true)
@@ -476,21 +507,28 @@ async function withPane(width, drive, { connected = true, fixture = applyFixture
     await showLanesOnScreen(ui.container, width)
     await drive({ root: ui.container, ctx, backend })
 
-    return ui.container.innerHTML
+    return offlineImages(ui.container.innerHTML)
   } finally {
     await ui.unmount()
   }
 }
 
 /** The heavy card's drawer, optionally with a tab clicked (it lights up) and "Pending only" switched on. */
-function heavyDrawer({ tab = null, pendingOnly = false }) {
+function heavyDrawer({ tab = null, pendingOnly = false, expand = false, fixture = applyHeavyFixture }) {
   return withPane(520, async ({ root }) => {
     await goToList(root, 'In progress')
     const card = $$(root, '[data-trello="card"]').find(el => text(el).includes('Release 4.2'))
     await env.click($(card, '[data-trello="card-open"]'))
 
-    if (!$(root, '[data-trello="drawer"]') || $$(root, '[data-trello="item"]').length !== 60) {
+    // the showcase has no checklists, so only the other drawers must show the 60 items
+    if (!$(root, '[data-trello="drawer"]') || (fixture === applyHeavyFixture && $$(root, '[data-trello="item"]').length !== 60)) {
       throw new Error('the heavy drawer did not open with its 60 checklist items')
+    }
+
+    const more = expand && $(root, '[data-trello="description-toggle"]')
+
+    if (more && text(more) === 'Show more') {
+      await env.click(more)
     }
 
     const control = $(root, '[data-trello="pending-only"] input, [data-trello="pending-only"] button')
@@ -504,7 +542,7 @@ function heavyDrawer({ tab = null, pendingOnly = false }) {
     if (button) {
       await env.click(button)
     }
-  }, { fixture: applyHeavyFixture })
+  }, { fixture })
 }
 
 /**
@@ -547,6 +585,7 @@ function applyStressFixture(backend) {
 
 // The heavy fixture lives in tests/desktop/harness.mjs (the render-count tests use it too); here it gets the fixed clock.
 const applyHeavyFixture = (backend, options = {}) => heavyFixture(backend, { now: NOW, ...options })
+const applyShowcaseFixture = (backend, options = {}) => showcaseFixture(backend, { now: NOW, ...options })
 
 const goToList = async (root, name) => {
   const chip = $$(root, '[data-trello="chip"]').find(el => text(el).startsWith(name))
@@ -587,6 +626,12 @@ const RENDERERS = {
   'heavy-drawer-pending': () => heavyDrawer({ tab: 'checklists', pendingOnly: true }),
 
   'drawer-sections': () => heavyDrawer({ tab: 'comments' }),
+
+  'markdown-showcase': () => heavyDrawer({ expand: true, fixture: applyShowcaseFixture }),
+
+  'attachments-preview': () => heavyDrawer({}),
+
+  'heavy-drawer-checklists-light': () => heavyDrawer({ tab: 'checklists' }),
 
   'heavy-4-lanes': () => withPane(1280, async () => {}, { fixture: b => applyHeavyFixture(b, { laneCount: 4 }) }),
 

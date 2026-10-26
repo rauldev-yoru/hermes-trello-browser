@@ -876,13 +876,17 @@ export function applyHeavyFixture(backend, { firstLane = 80, now = Date.now(), l
   })
 
   const authors = ['Ada Demo', 'Lin Demo', 'Sam Demo', 'Kai Demo']
+  // the shape the backend sends: every attachment carries thumb_url / width / height / is_image
+  const file = (name, url, bytes, mime, extra = {}) => ({ name, url, is_upload: true, bytes, mime, thumb_url: null, width: null, height: null, is_image: false, ...extra })
   const attachments = [
-    { name: 'release-notes-draft.pdf', url: 'https://example.invalid/files/release-notes-draft.pdf', is_upload: true, bytes: 482113, mime: 'application/pdf' },
-    { name: 'perf-before-after.png', url: 'https://example.invalid/files/perf-before-after.png', is_upload: true, bytes: 221044, mime: 'image/png' },
-    { name: 'rollout-plan.xlsx', url: 'https://example.invalid/files/rollout-plan.xlsx', is_upload: true, bytes: 88231, mime: 'application/vnd.ms-excel' },
-    { name: 'incident-timeline-2026-09-30-search-index-outage-postmortem-draft-v3-final.md', url: 'https://example.invalid/files/timeline.md', is_upload: true, bytes: 9120, mime: 'text/markdown' },
-    { name: 'Release runbook', url: 'https://example.invalid/runbook', is_upload: false, bytes: null, mime: null },
-    { name: 'Dashboard — error budget', url: 'https://example.invalid/dashboards/error-budget', is_upload: false, bytes: null, mime: null }
+    file('release-notes-draft.pdf', 'https://trello-attachments.s3.amazonaws.com/demo/release-notes-draft.pdf', 482113, 'application/pdf'),
+    // an image Trello made a preview of: a thumbnail on a Trello host loads by itself
+    file('perf-before-after.png', 'https://trello-attachments.s3.amazonaws.com/demo/perf-before-after.png', 221044, 'image/png', { thumb_url: 'https://trello-attachments.s3.amazonaws.com/demo/previews/perf-150.png', width: 150, height: 100, is_image: true }),
+    file('rollout-plan.xlsx', 'https://trello-attachments.s3.amazonaws.com/demo/rollout-plan.xlsx', 88231, 'application/vnd.ms-excel'),
+    file('incident-timeline-2026-09-30-search-index-outage-postmortem-draft-v3-final.md', 'https://trello-attachments.s3.amazonaws.com/demo/timeline.md', 9120, 'text/markdown'),
+    file('Release runbook', 'https://example.invalid/runbook', null, null, { is_upload: false }),
+    // a link to a picture on another host: it asks before loading
+    file('Error budget chart', 'https://charts.example.invalid/error-budget.png', null, 'image/png', { is_upload: false, is_image: true })
   ].map((a, i) => ({ id: oid(50 + i), ...a }))
 
   const activityTypes = ['updateCard', 'commentCard', 'updateCheckItemStateOnCard', 'updateCheckItemStateOnCard', 'addChecklistToCard']
@@ -944,4 +948,47 @@ export function makeCtx(sdk, backend, { clipboard = true } = {}) {
   }
 
   return ctx
+}
+
+/** Markdown that exercises every block and inline the pane understands (synthetic text). */
+export const SHOWCASE_MD = [
+  '# Release 4.2 notes',
+  '',
+  'A paragraph with **bold**, *italic*, ~~struck~~, `inline code` and a [link](https://example.invalid/runbook). Bare URL: https://example.invalid/status.',
+  '',
+  '> Ship only when every checklist is green.',
+  '> Second line of the quote.',
+  '',
+  '## Rollout',
+  '',
+  '| Stage | Share | Owner |',
+  '|:--|:-:|--:|',
+  '| Canary | 5% | Ada |',
+  '| Ramp | 25% | Lin |',
+  '| Everyone | 100% | Sam |',
+  '',
+  '---',
+  '',
+  '### Checks',
+  '',
+  '- Billing',
+  '  - invoices',
+  '  - proration',
+  '- Search',
+  '- [x] Reproduced',
+  '- [ ] Fix handler',
+  '',
+  '![Latency, last 24 h](https://trello-attachments.s3.amazonaws.com/demo/latency.png)',
+  '',
+  '![Diagram from another host](https://images.example.invalid/diagram.png)'
+].join('\n')
+
+/** The heavy board with a card whose description is SHOWCASE_MD (and no checklists, so the description is what you see). */
+export function applyShowcaseFixture(backend, options = {}) {
+  applyHeavyFixture(backend, options)
+  const detail = backend.state.details[oid(101)]
+
+  detail.desc = SHOWCASE_MD
+  detail.checklists = []
+  detail.comments = []
 }

@@ -343,7 +343,7 @@ session (mounted router inherits the dashboard's auth), and validate ids with
 | POST | `/checklists/{checklist_id}/items` | `{name}` — add one item |
 | PATCH | `/checklists/{id}/items/{item}` | `{state: "complete"\|"incomplete", name?}` |
 | DELETE | `/checklists/{id}/items/{item}` | remove item |
-| GET | `/cards/{id}/attachments` | list + url |
+| GET | `/cards/{id}/attachments` | list: `name`, `url`, `bytes`, `mime`, `is_upload`, and for pictures `is_image`, `thumb_url` (Trello's smallest preview) with its `width` / `height` |
 
 Applying an AI preview is a normal write route (e.g. `POST /cards/{id}/checklists`
 then one `POST` per item) — there is no `/assist` route, because the model call
