@@ -101,7 +101,12 @@ separately from the same repository when the install dialog offers it.
 
 ## Connect your Trello account
 
-The pane asks for an API **key** and **token**, both from your own account:
+The pane asks for an API **key** and **token** the first time you open it, and
+validates them against Trello before saving anything:
+
+![Connect your Trello account](docs/screenshots/connect.png)
+
+Both values come from your own account:
 
 1. Create a Power-Up at <https://trello.com/apps/admin> (any name works; only the
    credentials matter).

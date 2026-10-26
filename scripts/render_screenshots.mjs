@@ -96,7 +96,8 @@ const SCENES = [
   { name: 'pane-columns', width: 1280, height: 430 },
   // the drawer scrolls inside a 780 px pane; description + checklist + comments + activity need about 1075 px
   { name: 'card-drawer', width: 480, height: 1080 },
-  { name: 'directive-chip', width: 560, height: 140 }
+  { name: 'directive-chip', width: 560, height: 140 },
+  { name: 'connect', width: 480, height: 560 }
 ]
 
 const only = args.only ? new Set(args.only.split(',').map(s => s.trim()).filter(Boolean)) : null
@@ -402,12 +403,12 @@ const $ = (root, selector) => root.querySelector(selector)
 const $$ = (root, selector) => [...root.querySelectorAll(selector)]
 const text = el => (el.textContent || '').replace(/\s+/g, ' ').trim()
 
-async function withPane(width, drive) {
+async function withPane(width, drive, { connected = true } = {}) {
   sdk.queryClient.reset()
   sdk.host.paneVisible.set(true)
 
-  const backend = makeBackend()
-  applyFixture(backend)
+  const backend = makeBackend({ connected })
+  if (connected) applyFixture(backend)
   const ctx = makeCtx(sdk, backend)
   plugin.default.register(ctx)
 
@@ -441,6 +442,13 @@ const RENDERERS = {
     }),
 
   'pane-columns': () => withPane(1280, async () => {}),
+
+  connect: () =>
+    withPane(480, async ({ root }) => {
+      if (!$(root, '[data-trello="connect"]')) {
+        throw new Error('the connect form did not render')
+      }
+    }, { connected: false }),
 
   'card-drawer': () =>
     withPane(480, async ({ root }) => {
