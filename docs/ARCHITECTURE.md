@@ -399,7 +399,9 @@ with `invalid key`. An Atlassian OAuth 2.0 (3LO) client id/secret is **not** thi
 ## 7. Security posture (also the catalog disclosure)
 
 - Credentials never leave the backend process; the renderer only sees
-  `{connected, member.username}`. Thumbnails and attachments are proxied.
+  `{connected, member.username}`. Anything that needs the token is proxied;
+  public CDN URLs (member avatars, `trello-members*` hashed paths) are loaded
+  directly by the renderer because they carry no credential.
 - Fixed allowlist of Trello endpoints in the client. No URL taken from the body
   reaches the network (no SSRF door), no redirect following to another host.
 - Every id validated before interpolation; no path traversal, no query injection.
