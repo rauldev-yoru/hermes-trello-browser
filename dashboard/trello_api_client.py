@@ -379,6 +379,7 @@ def normalize_card(raw):
         "id": _str(raw.get("id")),
         "name": _str(raw.get("name")),
         "id_list": _str(raw.get("idList")),
+        "closed": bool(raw.get("closed")),
         "due": raw.get("due") if isinstance(raw.get("due"), str) else None,
         "due_complete": bool(raw.get("dueComplete")),
         "labels": labels,

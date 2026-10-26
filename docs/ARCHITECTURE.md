@@ -339,7 +339,8 @@ session (mounted router inherits the dashboard's auth), and validate ids with
 | POST | `/cards` | create (list_id, name, desc?, due?) |
 | PATCH | `/cards/{id}` | partial update (name, desc, due, idList, closed, labels) |
 | POST | `/cards/{id}/comments` | `{text}` |
-| POST | `/cards/{id}/checklists` | `{name}` |
+| POST | `/cards/{card_id}/checklists` | `{name}` |
+| POST | `/checklists/{checklist_id}/items` | `{name}` — add one item |
 | PATCH | `/checklists/{id}/items/{item}` | `{state: "complete"\|"incomplete", name?}` |
 | DELETE | `/checklists/{id}/items/{item}` | remove item |
 | GET | `/cards/{id}/attachments` | list + url |

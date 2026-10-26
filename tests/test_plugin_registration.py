@@ -147,7 +147,7 @@ class HandlerTests(unittest.TestCase):
             result = self.call(name)
             self.assertEqual(
                 result,
-                {"ok": False, "error": "not_connected", "hint": "Abrí el pane de Trello y conectá la cuenta."},
+                {"ok": False, "error": "not_connected", "hint": "Open the Trello pane and connect your account."},
                 name,
             )
         self.assertEqual(self.transport.calls, [])
@@ -279,8 +279,8 @@ class HygieneTests(unittest.TestCase):
                 self.assertIsNone(re.search(pattern, text), f"{name}: {pattern}")
 
     def test_no_environment_coupling(self):
-        banned = [r"/home/", r"/Users/", r"C:\\", r"localhost", r"127\.0\.0\.1",
-                  r"systemd", r"\bdocker\b"]
+        banned = [r"/home/", r"/Users/", r"C:\\\\", r"localhost", r"127\\.0\\.0\\.1",
+                  r"systemd", r"\bdocker\b", r"\bvpn\b", r"\\bssh\\b"]
         for name, text in self.sources().items():
             for pattern in banned:
                 self.assertIsNone(re.search(pattern, text, re.I), f"{name}: {pattern}")

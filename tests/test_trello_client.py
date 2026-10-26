@@ -162,6 +162,7 @@ class NormalizationTests(unittest.TestCase):
             view["cards"][0],
             {
                 "id": CARD_1, "name": "Card 10", "id_list": LIST_A,
+                "closed": False,
                 "due": "2026-11-01T12:00:00.000Z", "due_complete": False,
                 "labels": ["green", "Backend"], "id_members": [MEMBER],
                 "short_link": "AbCd1234", "url": "https://trello.com/c/AbCd1234",
