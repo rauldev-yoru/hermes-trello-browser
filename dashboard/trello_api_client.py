@@ -366,11 +366,14 @@ def normalize_list(raw):
 def normalize_card(raw):
     badges = raw.get("badges") if isinstance(raw.get("badges"), dict) else {}
     labels = []
+    label_ids = []
     for label in raw.get("labels") or []:
         if isinstance(label, dict):
             shown = label.get("name") or label.get("color")
             if shown:
                 labels.append(str(shown))
+            if _OID_RE.fullmatch(_str(label.get("id"))):
+                label_ids.append(label["id"])
     short = _str(raw.get("shortLink"))
     url = _safe_url(raw.get("shortUrl") or raw.get("url")) or (
         f"https://trello.com/c/{short}" if short else ""
@@ -383,6 +386,7 @@ def normalize_card(raw):
         "due": raw.get("due") if isinstance(raw.get("due"), str) else None,
         "due_complete": bool(raw.get("dueComplete")),
         "labels": labels,
+        "label_ids": label_ids,
         "id_members": [m for m in (raw.get("idMembers") or []) if isinstance(m, str)],
         "short_link": short,
         "url": url,
@@ -455,6 +459,65 @@ def normalize_comment(raw):
         "author": _str(creator.get("fullName")) or _str(creator.get("username")),
         "text": _str(data.get("text")),
         "date": _str(raw.get("date")),
+    }
+
+
+ACTIVITY_TYPES = "createCard,updateCard,commentCard,addChecklistToCard,updateCheckItemStateOnCard"
+ACTIVITY_LIMIT = 20
+_SUMMARY_MAX = 200
+_CHANGED_FIELDS = {
+    "name": "title",
+    "desc": "description",
+    "due": "due date",
+    "dueComplete": "due status",
+    "idLabels": "labels",
+    "idMembers": "members",
+}
+
+
+def _name_of(node):
+    return _str(node.get("name")) if isinstance(node, dict) else ""
+
+
+def summarize_action(action):
+    """One short, plain-English line for a Trello action (the comment text for comments)."""
+    kind = _str(action.get("type"))
+    data = action.get("data") if isinstance(action.get("data"), dict) else {}
+    if kind == "commentCard":
+        return _str(data.get("text"))
+    text = ""
+    if kind == "createCard":
+        where = _name_of(data.get("list"))
+        text = f"created this card in {where}" if where else "created this card"
+    elif kind == "updateCard":
+        before, after = _name_of(data.get("listBefore")), _name_of(data.get("listAfter"))
+        old = data.get("old") if isinstance(data.get("old"), dict) else {}
+        card = data.get("card") if isinstance(data.get("card"), dict) else {}
+        if before and after:
+            text = f"moved from {before} to {after}"
+        elif "closed" in old:
+            text = "archived this card" if card.get("closed") else "restored this card"
+        else:
+            changed = [label for key, label in _CHANGED_FIELDS.items() if key in old]
+            text = "changed " + ", ".join(changed) if changed else "updated this card"
+    elif kind == "addChecklistToCard":
+        name = _name_of(data.get("checklist"))
+        text = f"added checklist {name}" if name else "added a checklist"
+    elif kind == "updateCheckItemStateOnCard":
+        item = data.get("checkItem") if isinstance(data.get("checkItem"), dict) else {}
+        verb = "completed" if item.get("state") == "complete" else "marked incomplete"
+        text = f"{verb} {_str(item.get('name'))}".strip()
+    return text[:_SUMMARY_MAX]
+
+
+def normalize_activity(raw):
+    creator = raw.get("memberCreator") if isinstance(raw.get("memberCreator"), dict) else {}
+    return {
+        "id": _str(raw.get("id")),
+        "type": _str(raw.get("type")),
+        "author": _str(creator.get("fullName")) or _str(creator.get("username")),
+        "date": _str(raw.get("date")),
+        "text": summarize_action(raw),
     }
 
 
@@ -750,7 +813,7 @@ class TrelloClient:
 
     def _invalidate_all_content(self):
         self._bump()
-        for kind in ("view", "page", "card", "attachments"):
+        for kind in ("view", "page", "card", "attachments", "activity"):
             self._cache.drop_kind(kind)
 
     def _remember_checklists(self, card_id, checklists):
@@ -856,24 +919,35 @@ class TrelloClient:
                 "checklist_fields": "name,pos,idCard",
                 "attachments": "true",
                 "attachment_fields": "name,url,bytes,mimeType,isUpload",
+                "list": "true",
+                "list_fields": "name",
+                "board": "true",
+                "board_fields": "name",
             }
             action_query = {"filter": "commentCard", "limit": "20", "memberCreator_fields": "fullName,username"}
-            with ThreadPoolExecutor(max_workers=2) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 card_future = pool.submit(self._call, "card", ids, card_query)
                 actions_future = pool.submit(self._call, "card_actions", ids, action_query)
+                activity_future = pool.submit(self._fetch_activity, card_id)
             card_raw = card_future.result()
             actions_raw = actions_future.result()
+            activity = activity_future.result()
             card_raw = card_raw or {}
             checklists = [c for c in (card_raw.get("checklists") or []) if isinstance(c, dict)]
             self._remember_checklists(_str(card_raw.get("id")), checklists)
+            list_raw = card_raw.get("list") if isinstance(card_raw.get("list"), dict) else {}
+            board_raw = card_raw.get("board") if isinstance(card_raw.get("board"), dict) else {}
             return {
                 "card": normalize_card(card_raw),
                 "desc": _str(card_raw.get("desc")),
+                "list": {"id": _str(list_raw.get("id")) or _str(card_raw.get("idList")), "name": _str(list_raw.get("name"))},
+                "board": {"id": _str(board_raw.get("id")) or _str(card_raw.get("idBoard")), "name": _str(board_raw.get("name"))},
                 "checklists": [normalize_checklist(c) for c in _by_pos(checklists)],
                 "comments": [normalize_comment(a) for a in (actions_raw or []) if isinstance(a, dict)],
                 "attachments": [
                     normalize_attachment(a) for a in (card_raw.get("attachments") or []) if isinstance(a, dict)
                 ],
+                "activity": activity,
             }
 
         def tags(detail):
@@ -881,6 +955,25 @@ class TrelloClient:
             return {("card", card_id), ("card", card["id"]), ("card", card["short_link"])}
 
         return self._cached(("card", card_id), TTL_CARD, load, tags)
+
+    def _fetch_activity(self, card_id):
+        raw = self._call(
+            "card_actions",
+            {"card": card_id},
+            {"filter": ACTIVITY_TYPES, "limit": str(ACTIVITY_LIMIT), "memberCreator_fields": "fullName,username"},
+        )
+        rows = [normalize_activity(a) for a in (raw or []) if isinstance(a, dict)]
+        return rows[:ACTIVITY_LIMIT]
+
+    def activity(self, card_id):
+        """Latest card actions (created, updated, commented, checklist changes). Never None."""
+        card_id = _id(card_id, "card_id")
+        return self._cached(
+            ("activity", card_id),
+            TTL_CARD,
+            lambda: self._fetch_activity(card_id),
+            lambda _v: {("card", card_id)},
+        )
 
     def attachments(self, card_id):
         card_id = _id(card_id, "card_id")

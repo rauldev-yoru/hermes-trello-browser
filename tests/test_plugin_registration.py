@@ -50,6 +50,20 @@ class FakeCtx:
         self.skills.append((name, Path(path)))
 
 
+class ConfigCtx(FakeCtx):
+    """A ctx that answers get_config like PluginContext does (plugin-relative settings)."""
+
+    def __init__(self, settings=None, fail=False):
+        super().__init__()
+        self.settings = settings or {}
+        self.fail = fail
+
+    def get_config(self, key, default=None):
+        if self.fail:
+            raise RuntimeError("config unreadable")
+        return self.settings.get(key, default)
+
+
 def manifest_tools():
     """Read provides_tools from plugin.yaml without needing PyYAML."""
     tools, inside = [], False
@@ -102,7 +116,7 @@ class RegistrationTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertLess(len(text.splitlines()), 80)
         self.assertTrue(text.startswith("---\nname: trello-browser\n"))
-        for needle in ("untrusted", "checklist", "WRITE", "not_connected"):
+        for needle in ("untrusted", "checklist", "WRITE", "not_connected", "marker", "::trello{card="):
             self.assertIn(needle, text)
         for tool in EXPECTED_TOOLS:
             self.assertIn(tool, text)
@@ -207,6 +221,50 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(self.call("trello_checklist_item_add", checklist_id=CHECKLIST, name="Step")["data"]["item"]["id"], ITEM_1)
         done = self.call("trello_checklist_item_set", card_id=CARD_1, checklist_id=CHECKLIST, item_id=ITEM_1, state="complete")
         self.assertEqual(done["data"]["item"]["state"], "complete")
+
+    def comment_with(self, ctx, text="Looks fine"):
+        self.connect()
+        self.transport.routes[("POST", f"/1/cards/{CARD_1}/actions/comments")] = resp(
+            {"id": oid(61), "date": "2026-10-22T00:00:00.000Z", "data": {"text": "x"}, "memberCreator": {"username": "ada"}}
+        )
+        self.plugin.register(ctx)
+        raw = ctx.tools["trello_card_comment"]["handler"]({"card_id": CARD_1, "text": text})
+        self.assertTrue(json.loads(raw)["ok"], raw)
+        return self.transport.calls[-1][2]["text"]
+
+    def test_agent_comment_marker_defaults_to_a_robot(self):
+        self.assertEqual(self.comment_with(FakeCtx()), "\U0001f916 Looks fine", "no get_config at all: default marker")
+        self.assertEqual(self.comment_with(ConfigCtx()), "\U0001f916 Looks fine", "key not configured: default marker")
+
+    def test_agent_comment_marker_is_configurable_and_can_be_switched_off(self):
+        self.assertEqual(self.comment_with(ConfigCtx({"agent_comment_marker": "[agent] "})), "[agent] Looks fine")
+        self.assertEqual(self.comment_with(ConfigCtx({"agent_comment_marker": ""})), "Looks fine")
+
+    def test_agent_comment_marker_ignores_bad_config(self):
+        for bad in (None, 5, ["x"], "x" * 40):
+            self.assertEqual(self.comment_with(ConfigCtx({"agent_comment_marker": bad})), "\U0001f916 Looks fine", repr(bad))
+        self.assertEqual(self.comment_with(ConfigCtx(fail=True)), "\U0001f916 Looks fine", "unreadable config never blocks register()")
+
+    def test_agent_comment_marker_is_not_doubled_and_resets_between_registrations(self):
+        self.assertEqual(self.comment_with(FakeCtx(), "\U0001f916 already marked"), "\U0001f916 already marked")
+        self.assertEqual(self.comment_with(ConfigCtx({"agent_comment_marker": ""})), "Looks fine")
+        self.assertEqual(self.comment_with(FakeCtx()), "\U0001f916 Looks fine", "a later register() without config is back to the default")
+        self.plugin.configure(agent_comment_marker=">> ")
+        self.assertEqual(self.plugin.comment_marker(), ">> ")
+
+    def test_only_the_comment_tool_marks_text(self):
+        self.connect()
+        t = self.transport.routes
+        t[("POST", f"/1/cards/{CARD_1}/checklists")] = resp({"id": CHECKLIST, "name": "Plan", "idCard": CARD_1})
+        t[("PUT", f"/1/cards/{CARD_1}")] = resp(raw_card(10))
+        self.call("trello_checklist_add", card_id=CARD_1, name="Plan")
+        self.call("trello_card_update", card_id=CARD_1, name="Renamed", desc="Body")
+        for _method, _path, params in self.transport.calls:
+            self.assertNotIn("\U0001f916", json.dumps(params, ensure_ascii=False))
+
+    def test_comment_tool_description_tells_the_agent_about_the_marker(self):
+        description = self.ctx.tools["trello_card_comment"]["schema"]["description"]
+        self.assertIn("marker", description)
 
     def test_argument_errors_are_soft(self):
         self.connect()

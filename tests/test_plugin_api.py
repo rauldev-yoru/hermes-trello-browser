@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_trello_client import (  # noqa: E402 - shared fixtures live next to the client tests
-    BOARD, CARD_1, CHECKLIST, ITEM_1, KEY, LIST_A, LIST_B, TOKEN,
+    BOARD, CARD_1, CHECKLIST, ITEM_1, KEY, LABEL, LIST_A, LIST_B, TOKEN,
     C, FakeTransport, board_routes, oid, raw_card, resp,
 )
 
@@ -197,7 +197,11 @@ class PluginApiTests(unittest.TestCase):
         self.transport.routes[("GET", f"/1/cards/{CARD_1}/attachments")] = resp(
             [{"id": oid(50), "name": "a", "url": "https://example.invalid/a", "bytes": 5, "mimeType": "text/plain", "isUpload": False}]
         )
-        self.assertEqual(self.get(f"/cards/{CARD_1}").json()["desc"], "Body")
+        body = self.get(f"/cards/{CARD_1}").json()
+        self.assertEqual(body["desc"], "Body")
+        self.assertEqual(body["activity"], [])
+        self.assertEqual(body["card"]["label_ids"], [LABEL, oid(31)])
+        self.assertEqual(self.get(f"/cards/{CARD_1}/activity").json(), [])
         self.assertEqual(
             self.get(f"/cards/{CARD_1}/attachments").json(),
             [{"id": oid(50), "name": "a", "url": "https://example.invalid/a", "is_upload": False, "bytes": 5, "mime": "text/plain"}],
@@ -237,6 +241,8 @@ class PluginApiTests(unittest.TestCase):
         t[("PUT", f"/1/cards/{CARD_1}/checkItem/{ITEM_1}")] = resp({"id": ITEM_1, "name": "Step", "state": "complete"})
         t[("DELETE", f"/1/checklists/{CHECKLIST}/checkItems/{ITEM_1}")] = resp({})
         self.assertEqual(self.http.post(self.base + f"/cards/{CARD_1}/comments", json={"text": "hello"}).status_code, 201)
+        sent = self.transport.calls[-1][2]["text"]
+        self.assertEqual(sent, "hello", "the pane writes as the human: the agent marker is never applied on the HTTP route")
         made = self.http.post(self.base + f"/cards/{CARD_1}/checklists", json={"name": "Plan"})
         self.assertEqual(made.json(), {"id": CHECKLIST, "name": "Plan", "items": []})
         added = self.http.post(self.base + f"/checklists/{CHECKLIST}/items", json={"name": "Step"})

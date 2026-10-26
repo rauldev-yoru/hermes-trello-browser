@@ -227,6 +227,11 @@ def card_detail(card_id: str):
     return _client().card(card_id)
 
 
+@router.get("/cards/{card_id}/activity")
+def card_activity(card_id: str):
+    return _client().activity(card_id)
+
+
 @router.get("/cards/{card_id}/attachments")
 def card_attachments(card_id: str):
     return _client().attachments(card_id)

@@ -164,7 +164,7 @@ class NormalizationTests(unittest.TestCase):
                 "id": CARD_1, "name": "Card 10", "id_list": LIST_A,
                 "closed": False,
                 "due": "2026-11-01T12:00:00.000Z", "due_complete": False,
-                "labels": ["green", "Backend"], "id_members": [MEMBER],
+                "labels": ["green", "Backend"], "label_ids": [LABEL, oid(31)], "id_members": [MEMBER],
                 "short_link": "AbCd1234", "url": "https://trello.com/c/AbCd1234",
                 "comment_count": 2, "attachment_count": 1,
                 "checklist": {"total": 4, "done": 1},
@@ -202,15 +202,33 @@ class NormalizationTests(unittest.TestCase):
                 {"id": oid(51), "name": "evil", "url": "javascript:alert(1)", "isUpload": False},
             ],
         )
-        actions = [{"id": oid(60), "date": "2026-10-21T10:00:00.000Z",
-                    "data": {"text": "Looks good"}, "memberCreator": {"fullName": "Ada Demo", "username": "ada"}}]
+        comments = [{"id": oid(60), "type": "commentCard", "date": "2026-10-21T10:00:00.000Z",
+                     "data": {"text": "Looks good"}, "memberCreator": {"fullName": "Ada Demo", "username": "ada"}}]
+        feed = [
+            {"id": oid(63), "type": "updateCard", "date": "2026-10-22T10:00:00.000Z",
+             "data": {"listBefore": {"name": "To do"}, "listAfter": {"name": "Doing"}}, "memberCreator": {"username": "ada"}},
+            comments[0],
+        ]
         routes = {
-            ("GET", f"/1/cards/{CARD_1}"): resp(card),
-            ("GET", f"/1/cards/{CARD_1}/actions"): resp(actions),
+            ("GET", f"/1/cards/{CARD_1}"): resp({**card, "list": {"id": LIST_A, "name": "To do"}, "board": {"id": BOARD, "name": "Demo board"}}),
+            ("GET", f"/1/cards/{CARD_1}/actions"): lambda params: resp(feed if "updateCard" in params["filter"] else comments),
         }
-        client, _, _ = make_client(routes)
+        client, transport, _ = make_client(routes)
         detail = client.card(CARD_1)
-        self.assertEqual(set(detail), {"card", "desc", "checklists", "comments", "attachments"})
+        self.assertEqual(set(detail), {"card", "desc", "list", "board", "checklists", "comments", "attachments", "activity"})
+        self.assertEqual(detail["list"], {"id": LIST_A, "name": "To do"})
+        self.assertEqual(detail["board"], {"id": BOARD, "name": "Demo board"})
+        filters = sorted(c[2]["filter"] for c in transport.calls if c[1].endswith("/actions"))
+        self.assertEqual(filters, ["commentCard", C.ACTIVITY_TYPES])
+        self.assertEqual(
+            detail["activity"],
+            [
+                {"id": oid(63), "type": "updateCard", "author": "ada", "date": "2026-10-22T10:00:00.000Z",
+                 "text": "moved from To do to Doing"},
+                {"id": oid(60), "type": "commentCard", "author": "Ada Demo", "date": "2026-10-21T10:00:00.000Z",
+                 "text": "Looks good"},
+            ],
+        )
         self.assertEqual(detail["desc"], "Hello")
         self.assertEqual(
             detail["checklists"],
@@ -228,6 +246,75 @@ class NormalizationTests(unittest.TestCase):
              "is_upload": True, "bytes": 1234, "mime": "application/pdf"},
         )
         self.assertIsNone(detail["attachments"][1]["url"], "non-http(s) attachment URLs are dropped")
+
+    def test_label_ids_follow_the_labels(self):
+        card = C.normalize_card(raw_card(10, labels=[
+            {"id": oid(31), "name": "bug", "color": "red"},
+            {"id": oid(32), "name": "", "color": "red"},
+            {"id": oid(33), "name": "", "color": None},
+            {"id": "not-an-id", "name": "odd", "color": "blue"},
+        ]))
+        self.assertEqual(card["labels"], ["bug", "red", "odd"])
+        # every real id is kept, even for a label with no display text; malformed ids are dropped
+        self.assertEqual(card["label_ids"], [oid(31), oid(32), oid(33)])
+        self.assertEqual(C.normalize_card({"id": CARD_1})["label_ids"], [])
+
+    def test_activity_summaries(self):
+        def action(kind, data, n=1):
+            return {"id": oid(200 + n), "type": kind, "date": "2026-10-22T10:00:00.000Z",
+                    "data": data, "memberCreator": {"fullName": "Ada Demo"}}
+
+        cases = {
+            "createCard": (action("createCard", {"list": {"name": "Backlog"}}), "created this card in Backlog"),
+            "moved": (action("updateCard", {"listBefore": {"name": "A"}, "listAfter": {"name": "B"}}), "moved from A to B"),
+            "archived": (action("updateCard", {"old": {"closed": False}, "card": {"closed": True}}), "archived this card"),
+            "restored": (action("updateCard", {"old": {"closed": True}, "card": {"closed": False}}), "restored this card"),
+            "changed": (action("updateCard", {"old": {"due": None, "desc": ""}}), "changed description, due date"),
+            "updated": (action("updateCard", {"old": {"pos": 1}}), "updated this card"),
+            "checklist": (action("addChecklistToCard", {"checklist": {"name": "QA"}}), "added checklist QA"),
+            "done": (action("updateCheckItemStateOnCard", {"checkItem": {"name": "Ship", "state": "complete"}}), "completed Ship"),
+            "undone": (action("updateCheckItemStateOnCard", {"checkItem": {"name": "Ship", "state": "incomplete"}}), "marked incomplete Ship"),
+            "comment": (action("commentCard", {"text": "hello"}), "hello"),
+        }
+
+        for name, (raw, expected) in cases.items():
+            row = C.normalize_activity(raw)
+            self.assertEqual(row["text"], expected, name)
+            self.assertEqual(set(row), {"id", "type", "author", "date", "text"})
+            self.assertEqual(row["type"], raw["type"], "type is kept exactly as Trello sends it")
+            self.assertEqual(row["author"], "Ada Demo")
+
+        self.assertEqual(C.normalize_activity({"type": "weird"})["text"], "")
+        self.assertLessEqual(len(C.normalize_activity(action("updateCard", {"listBefore": {"name": "x" * 500}, "listAfter": {"name": "y"}}))["text"]), 200)
+
+    def test_activity_is_a_list_even_when_empty_and_capped_at_20(self):
+        routes = {
+            ("GET", f"/1/cards/{CARD_1}"): resp(raw_card(10)),
+            ("GET", f"/1/cards/{CARD_1}/actions"): resp([]),
+        }
+        client, transport, _ = make_client(routes)
+        self.assertEqual(client.card(CARD_1)["activity"], [])
+        self.assertEqual(client.activity(CARD_1), [])
+
+        many = [{"id": oid(300 + i), "type": "commentCard", "date": "2026-10-22T10:00:00Z", "data": {"text": str(i)}} for i in range(30)]
+        transport.routes[("GET", f"/1/cards/{CARD_1}/actions")] = resp(many)
+        client.invalidate_card(CARD_1)
+        self.assertEqual(len(client.activity(CARD_1)), 20)
+        self.assertEqual(transport.calls[-1][2]["limit"], "20")
+
+    def test_activity_shares_the_card_cache_rules(self):
+        routes = {("GET", f"/1/cards/{CARD_1}/actions"): resp([])}
+        client, transport, fake = make_client(routes)
+        client.activity(CARD_1)
+        fake.now += 9
+        client.activity(CARD_1)
+        self.assertEqual(transport.count(), 1)
+        fake.now += 2
+        client.activity(CARD_1)
+        self.assertEqual(transport.count(), 2, "same 10 s TTL as the card detail")
+        client.invalidate_card(CARD_1)
+        client.activity(CARD_1)
+        self.assertEqual(transport.count(), 3, "same invalidation as the card detail")
 
     def test_boards_starred_first(self):
         routes = {

@@ -20,6 +20,26 @@ _NOT_CONNECTED = {
 }
 
 
+# Prefix put on comments written through the agent tool, so readers can tell them from
+# the account owner's own comments. Resolved once in register() (the tool handlers get no
+# ctx) and passed through configure(). Set to "" to switch the marker off.
+DEFAULT_COMMENT_MARKER = "\U0001f916 "
+MAX_MARKER_CHARS = 16
+_SETTINGS = {"agent_comment_marker": DEFAULT_COMMENT_MARKER}
+
+
+def configure(agent_comment_marker=DEFAULT_COMMENT_MARKER):
+    """Set the module-level options the tool handlers read. Invalid values fall back to defaults."""
+    marker = agent_comment_marker
+    if not isinstance(marker, str) or len(marker) > MAX_MARKER_CHARS:
+        marker = DEFAULT_COMMENT_MARKER
+    _SETTINGS["agent_comment_marker"] = marker
+
+
+def comment_marker():
+    return _SETTINGS["agent_comment_marker"]
+
+
 def _load_client():
     path = _HERE / "dashboard" / "trello_api_client.py"
     existing = sys.modules.get(_CLIENT_NAME)
@@ -136,7 +156,11 @@ def _card_update(client, args):
 
 def _card_comment(client, args):
     _required(args, "card_id", "text")
-    return {"comment": client.add_comment(args["card_id"], args["text"])}
+    text = args["text"]
+    marker = comment_marker()
+    if marker and isinstance(text, str) and not text.startswith(marker):
+        text = marker + text
+    return {"comment": client.add_comment(args["card_id"], text)}
 
 
 def _checklist_add(client, args):
@@ -250,7 +274,8 @@ _TOOLS = [
         _schema(
             "trello_card_comment",
             "WRITE: post a comment on a card as the connected account. Visible to everyone who "
-            "can see the card, so write it as the user would.",
+            "can see the card. The text is automatically prefixed with an agent marker (a robot "
+            "emoji by default) so readers can tell it is not a human comment: do not add your own.",
             {"card_id": _s("Card id. " + _ID_NOTE), "text": _s("Comment text (markdown).")},
             ["card_id", "text"],
         ),
@@ -312,7 +337,19 @@ def _make_handler(fn):
     return handler
 
 
+def _read_marker_setting(ctx):
+    """plugins.entries.<id>.settings.agent_comment_marker, or the default."""
+    getter = getattr(ctx, "get_config", None)
+    if not callable(getter):
+        return DEFAULT_COMMENT_MARKER
+    try:
+        return getter("agent_comment_marker", default=DEFAULT_COMMENT_MARKER)
+    except Exception:  # noqa: BLE001 - a broken config read must never block registration
+        return DEFAULT_COMMENT_MARKER
+
+
 def register(ctx):
+    configure(agent_comment_marker=_read_marker_setting(ctx))
     for schema, fn in _TOOLS:
         ctx.register_tool(
             name=schema["name"],

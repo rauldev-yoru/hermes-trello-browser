@@ -49,6 +49,21 @@ report that to the user and do nothing else.
 5. Apply it: `trello_checklist_add`, then one `trello_checklist_item_add` per
    item. Report the checklist id.
 
+## Your comments are marked
+
+`trello_card_comment` prefixes every comment with an agent marker (a robot emoji by
+default; `plugins.entries.trello-browser.settings.agent_comment_marker` changes it, an
+empty string disables it). Do not add your
+own marker or sign the comment: readers already know it came from the agent.
+
+## Showing a card in the chat
+
+Write `::trello{card="<id or short link>"}` as a paragraph of its own and the chat
+renders a live chip (name, list, due date, open-in-Trello). Use it for ONE card, never
+for a list of cards, and especially right after you create or move a card so the user
+sees the result. Accepted values: the 24-character id or the 8-character short link.
+Anything else renders as plain text.
+
 ## Writing back
 
 - Make the smallest change that does the job; never rewrite a description when a
