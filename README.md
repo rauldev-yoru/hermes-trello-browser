@@ -18,7 +18,7 @@ Design and scope: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Install
 
 ```bash
-hermes plugins install <owner>/hermes-trello-browser --enable
+hermes plugins install rauldev-yoru/hermes-trello-browser --enable
 ```
 
 Then open the pane from the command palette and paste a Trello **API key** and

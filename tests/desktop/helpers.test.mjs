@@ -419,7 +419,7 @@ test('plugin.js source rules', async t => {
     assert.doesNotMatch(code, /\beval\s*\(|new\s+Function\s*\(/)
     assert.doesNotMatch(code, /\bdocument\.|\bwindow\.|localStorage|sessionStorage|\bfetch\s*\(|XMLHttpRequest|WebSocket/)
     assert.doesNotMatch(code, /setInterval|(?<!ctx\.)setTimeout/, 'no hand-rolled timers or polls (only the scoped ctx.setTimeout)')
-    assert.doesNotMatch(SOURCE, /\/home\/|\/Users\/|C:\\|localhost|127\.0\.0\.1|systemd|\bdocker\b/i)
+    assert.doesNotMatch(SOURCE, /\/home\/|\/Users\/|C:\\\\|localhost|127\.0\.0\.1|systemd|\bdocker\b|\bvpn\b/i)
 
     const colors = [...code.matchAll(/var\((--[\w-]+)\)/g)].map(m => m[1])
     const allowed = /^--ui-(text-(primary|secondary|tertiary|quaternary)|stroke-(primary|secondary|tertiary|quaternary)|bg-(primary|secondary|tertiary|card|elevated|input|quaternary)|accent|accent-secondary|blue|green|orange|red|yellow|purple|cyan)$/
