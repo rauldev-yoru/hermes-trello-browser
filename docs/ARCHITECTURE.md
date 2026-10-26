@@ -502,6 +502,17 @@ hot-reloads. For a non-linked install the app loads its copy, so refresh it with
 **Capabilities → Plugins → Rescan** after editing `desktop/plugin.js`.
 `hermes plugins doctor <path>` reports a stale copy with the exact path.
 
+**Multiple profiles in one app.** A plugin installed in the default home as a
+`user` plugin serves the launch profile only: with multi-profile hosting, a request
+scoped to another profile is refused with `{"detail":"Plugin not found"}` (the
+mount gate requires that profile's own scan to find a **bundled** copy of the same
+plugin with the same API path). So if the desktop app lets the user switch
+profiles and the pane must work in all of them, install the package inside the
+Hermes installation's bundled plugins directory instead of the home's `plugins/`,
+and remove any same-name `user` copy — user directories are scanned first and
+shadow the bundled one. A new source or a new plugin name is picked up at the
+next dashboard boot, so one restart is part of the install.
+
 **No environment coupling in this repo.** No absolute paths outside
 `$HERMES_HOME` / `Path.home()`, no hardcoded machine or user names, no assumed
 hostname, port, domain, tunnel or container runtime, no OS-specific branches
