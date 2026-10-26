@@ -545,7 +545,9 @@ author's own setup in code, comments, tests, docs, screenshots or example data
   where the agent half is enabled.
 - **P3** ⏳ assistant actions stay prompt-insert (the `ctx.llm` shortcut is a
   spike); the `::trello{}` transcript directive is not written.
-- **P4** ⏳ not started.
+- **P4** 🚧 README, `SECURITY.md` and four rendered screenshots are in the repo
+  (regenerable with `scripts/render_screenshots.mjs`); the catalog entry is
+  prepared and waiting for its pull request.
 
 Effort, honestly: P0 ≈ one long session; P1 ≈ two; P2 ≈ one; P3 ≈ one; P4 ≈ one
 plus review latency. The 33k-line `jira-browser` took its author far longer
