@@ -81,7 +81,12 @@ export function Checkbox({ checked, onCheckedChange, className, disabled, ...pro
       disabled,
       role: 'checkbox',
       type: 'button',
-      ...props
+      ...props,
+      // like Radix: a click asks for the opposite state
+      onClick: event => {
+        if (props.onClick) props.onClick(event)
+        if (onCheckedChange && !disabled) onCheckedChange(!checked)
+      }
     },
     checked
       ? e(

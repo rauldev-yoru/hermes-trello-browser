@@ -150,7 +150,7 @@ test('desktop pane render harness', { skip }, async t => {
     assert.equal($$(drawer, '[data-trello="comment"]').length, 2)
     assert.ok($(drawer, 'textarea'), 'comment composer')
     assert.ok(text($(drawer, '[data-trello="attachments"]')).includes('repro.mov'))
-    assert.equal($$($(drawer, '[data-trello="attachments"]'), 'button').length, 1, 'only the attachment with a URL can be opened')
+    assert.equal($$($(drawer, '[data-trello="attachments"]'), 'a[href]').length, 1, 'only the attachment with a URL can be opened')
     const activity = $(drawer, '[data-trello="activity"]')
     const rows = $$(activity, '[data-trello="activity-row"]')
     assert.deepEqual(rows.map(r => r.getAttribute('data-trello-type')), ['updateCard', 'commentCard', 'updateCheckItemStateOnCard', 'createCard'])
@@ -565,13 +565,19 @@ test('desktop pane render harness', { skip }, async t => {
     assert.deepEqual(backend.callsTo('POST', /\/checklists$/).at(-1).body, { name: 'Release' })
     assert.equal($$(drawer(), '[data-trello="checklist"]').length, 2)
 
+    // edit and delete are not drawn at rest: they appear on hover
+    assert.equal($$(drawer(), '[aria-label="Rename item"]').length, 0)
+    await env.hover($$(drawer(), '[data-trello="item"]')[0])
     await env.click($$(drawer(), '[data-trello="item"]')[0].querySelector('[aria-label="Rename item"]'))
     const rename = $(drawer(), '[data-trello="item"] input[type=text], [data-trello="item"] input:not([type])')
     await env.type(rename, 'Reproduce in Firefox')
     await env.key(rename, 'Enter')
     assert.deepEqual(backend.callsTo('PATCH', /items/).at(-1).body, { name: 'Reproduce in Firefox' })
 
+    await env.hover($$(drawer(), '[data-trello="item"]')[1])
     await env.click($$(drawer(), '[data-trello="item"]')[1].querySelector('[aria-label="Delete item"]'))
+    assert.equal(backend.callsTo('DELETE', /items/).length, 0, 'deleting asks first')
+    await env.click($(drawer(), '[data-trello="item-delete-confirm"]'))
     assert.equal(backend.callsTo('DELETE', /items/).length, 1)
 
     await env.type($(drawer(), '[data-trello="due-input"]'), '2026-12-01')

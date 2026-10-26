@@ -15,10 +15,12 @@ The mode is decided from the pane's own width, measured with a `ResizeObserver`
 | `< 560 px` | list focus | list chips with card counts, one list of cards at a time |
 | `>= 560 px` | columns | one lane per list, horizontal scroll, header with the card count |
 
-Both modes start with the same strip of list chips (name + card count, one row, about 42 px,
-horizontal scroll). In columns mode a click scrolls that lane into view and the lanes that
-are on screen are highlighted (an `IntersectionObserver` on the lanes); in list mode the
-chips are tabs.
+List mode always starts with a strip of list chips (name + card count, one row, about 42 px,
+horizontal scroll; the chips are tabs). Columns mode shows the same strip **only when the lanes
+do not fit** the measured pane width (`lanesFit`: lanes x lane width + 10 px gaps + 24 px
+padding), so a board of four lanes in a wide pane gets its 42 px back. A click on a chip scrolls
+that lane into view and the lanes that are on screen are highlighted (an `IntersectionObserver`
+on the lanes).
 
 Cards are built for long lanes: each one carries `content-visibility: auto` with a
 `contain-intrinsic-size` estimate, so the browser skips style and layout for cards that are
@@ -35,14 +37,48 @@ off screen. Consequences to know about:
 
 Cards also have two densities (Settings > Card density): comfortable, and compact (one-line
 title, labels as colour bars, meta and avatars on one row). Labels show at most three, avatars
-at most three, each with a `+N` chip whose `title` names the rest. The card's action row is an
-overlay on hover or selection, so selecting a card never moves the ones below it.
+at most three, each with a `+N` chip whose `title` names the rest.
+
+The card's actions (send to agent, open in Trello, move menu) appear on hover, on keyboard focus
+and on the selected card, **in the place of the avatars** at the right of the meta row (the row with
+the due date, checklist, comment and attachment counts). The meta row is a sibling of the title
+button, not inside it. The avatars stay in the flow, hidden, and the actions sit on top of that
+same box, so nothing reflows: the card keeps its height, the actions never cover text, and the
+slot always reserves room for three buttons. A card with nothing to show in that row (no due
+date, counts or people) therefore keeps an empty row about 18 px tall.
 
 Cards, checklist items and Markdown blocks are memoized and receive only the props they use,
 so a poll that changes nothing renders no card, and a selection change renders two.
 
 The card drawer opens on the right **inside the pane**, never as a modal over the
 chat.
+
+## Card drawer
+
+- **Sections.** A sticky row under the title has one tab per section with its count:
+  `Description`, `Checklists 24/60` (done/total over every item), `Comments 12`, `Files 6`,
+  `Activity 20`. A click scrolls the drawer's own scroller (`scrollTo` on it, never
+  `scrollIntoView`, which would also move the chat around the pane) to the section, below the sticky
+  row; while scrolling, the section that has reached the row is highlighted. With a drawer narrower
+  than about 400 px the row scrolls sideways.
+- **Description.** Clamped to 14 lines with `Show more` / `Show less`. The button exists only when the text
+  overflows: measured where there is a layout, estimated from the text length (`estimateLines`)
+  where there is none. Headings render by level (`#` to `####`) with different size and weight.
+- **Footer.** One row: send to agent, suggest checklist, and a `...` menu with open in Trello, copy link and archive.
+- **Checklists.** Each one has a collapse toggle, a progress bar and `done/total`; a checklist whose items are
+  all done starts collapsed (decided once, when it first appears: ticking the last item never folds it
+  under the pointer). `Pending only` hides the done items but keeps every count. An item ticked
+  while it is on stays in the list, struck through, for 1.2 s (`PENDING_SETTLE_MS`, through
+  `ctx.setTimeout`) and then leaves, never in the same render. Edit and delete are not drawn at rest: they appear on
+  hover, on keyboard focus anywhere in the row, and after a tap on the item text (touch).
+  **Delete asks inline first** (`Delete this item?` with Delete / Cancel; focus starts on Cancel, Escape
+  cancels). An undo toast was rejected: undo can only re-create the item (new position, ticked state
+  lost) and relies on the host showing toasts with actions; asking first loses nothing.
+- **Comments.** The composer and the 3 newest comments (newest first by date); `Show N more` reveals the
+  rest of what the API already returned, with no new request. A comment longer than 6 lines is
+  clamped with its own `Show more`. The backend returns at most 20 comments and cannot say whether
+  there were more, so with exactly 20 the drawer adds `Older comments are in Trello` and an
+  open-in-Trello action.
 
 ## Data and refresh
 

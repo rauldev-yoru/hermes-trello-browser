@@ -21,7 +21,8 @@
 //                                                 looked up next to the CSS and in node_modules/@vscode/codicons
 //   --out <dir>             (default docs/screenshots)
 //   --only <name>[,<name>]  render a subset: pane-list, pane-columns, card-drawer, directive-chip, connect, stress,
-//                           heavy-columns, heavy-compact, heavy-list, heavy-drawer, heavy-drawer-checklists
+//                           heavy-columns, heavy-compact, heavy-list, heavy-drawer, heavy-drawer-checklists,
+//                           heavy-drawer-pending, drawer-sections, heavy-4-lanes
 //   --keep-html <dir>       also write the intermediate HTML pages there (debugging)
 //   --allow-missing-font    continue without the icon font (icons render as empty boxes)
 //   --measure               do not write images: measure DOM size, render counts, drawer cost and real-Chromium
@@ -102,7 +103,8 @@ const SCENES = [
   // heights are cropped to the content: a pane screenshot should end where the board ends
   { name: 'pane-list', width: 480, height: 442 },
   // 4 lanes of 300 px + gaps + padding need 1254 px; at 1200 the last lane would be cut by the horizontal scroll
-  { name: 'pane-columns', width: 1280, height: 430 },
+  // (they fit, so there is no lane strip; the tallest lane needs about 410 px)
+  { name: 'pane-columns', width: 1280, height: 420 },
   // the drawer scrolls inside a 780 px pane; description + checklist + comments + activity need about 1075 px
   { name: 'card-drawer', width: 480, height: 1080 },
   { name: 'directive-chip', width: 560, height: 140 },
@@ -116,7 +118,13 @@ const SCENES = [
   { name: 'heavy-compact', width: 1280, height: 720 },
   { name: 'heavy-drawer', width: 520, height: 1100 },
   // the same drawer scrolled to where the checklists start: 60 items, what the owner scrolls through
-  { name: 'heavy-drawer-checklists', width: 520, height: 1100, scrollTo: '[data-trello="checklists"]' }
+  { name: 'heavy-drawer-checklists', width: 520, height: 1100, scrollTo: '[data-trello="drawer"] [data-trello="checklists"]' },
+  // the same drawer with "Pending only" on, at the checklists
+  { name: 'heavy-drawer-pending', width: 520, height: 1100, scrollTo: '[data-trello="drawer"] [data-trello="checklists"]' },
+  // the drawer scrolled to the comments (the Comments tab lit): the section tabs, the three latest comments, Show more
+  { name: 'drawer-sections', width: 520, height: 1100, scrollTo: '[data-trello="drawer"] [data-trello="comments"]' },
+  // a heavy board whose 4 lanes fit the pane: no lane strip
+  { name: 'heavy-4-lanes', width: 1280, height: 720 }
 ]
 
 const only = args.only ? new Set(args.only.split(',').map(s => s.trim()).filter(Boolean)) : null
@@ -474,6 +482,31 @@ async function withPane(width, drive, { connected = true, fixture = applyFixture
   }
 }
 
+/** The heavy card's drawer, optionally with a tab clicked (it lights up) and "Pending only" switched on. */
+function heavyDrawer({ tab = null, pendingOnly = false }) {
+  return withPane(520, async ({ root }) => {
+    await goToList(root, 'In progress')
+    const card = $$(root, '[data-trello="card"]').find(el => text(el).includes('Release 4.2'))
+    await env.click($(card, '[data-trello="card-open"]'))
+
+    if (!$(root, '[data-trello="drawer"]') || $$(root, '[data-trello="item"]').length !== 60) {
+      throw new Error('the heavy drawer did not open with its 60 checklist items')
+    }
+
+    const control = $(root, '[data-trello="pending-only"] input, [data-trello="pending-only"] button')
+
+    if (pendingOnly && control) {
+      await env.click(control)
+    }
+
+    const button = tab && $(root, `[data-trello="drawer-tab"][data-section="${tab}"]`)
+
+    if (button) {
+      await env.click(button)
+    }
+  }, { fixture: applyHeavyFixture })
+}
+
 /**
  * The page is static, so nothing would tell the lane strip which lanes are on screen. Do what the browser's
  * IntersectionObserver does at scroll position 0: the lanes that fit the pane width are the visible ones.
@@ -546,18 +579,16 @@ const RENDERERS = {
       await env.key($(root, '[data-trello="workspace"]'), 'j')
     }, { fixture: applyHeavyFixture }),
 
-  'heavy-drawer': () =>
-    withPane(520, async ({ root }) => {
-      await goToList(root, 'In progress')
-      const card = $$(root, '[data-trello="card"]').find(el => text(el).includes('Release 4.2'))
-      await env.click($(card, '[data-trello="card-open"]'))
+  'heavy-drawer': () => heavyDrawer({}),
 
-      if (!$(root, '[data-trello="drawer"]') || $$(root, '[data-trello="item"]').length !== 60) {
-        throw new Error('the heavy drawer did not open with its 60 checklist items')
-      }
-    }, { fixture: applyHeavyFixture }),
+  'heavy-drawer-checklists': () => heavyDrawer({ tab: 'checklists' }),
 
-  'heavy-drawer-checklists': () => RENDERERS['heavy-drawer'](),
+  // Before the drawer had a filter the scene is the plain drawer: the controls are only used when they exist.
+  'heavy-drawer-pending': () => heavyDrawer({ tab: 'checklists', pendingOnly: true }),
+
+  'drawer-sections': () => heavyDrawer({ tab: 'comments' }),
+
+  'heavy-4-lanes': () => withPane(1280, async () => {}, { fixture: b => applyHeavyFixture(b, { laneCount: 4 }) }),
 
   connect: () =>
     withPane(480, async ({ root }) => {
@@ -714,9 +745,10 @@ async function capture(browser, { width, height, file, scrollTo = null }) {
         returnByValue: true,
         expression: `(() => {
           const target = document.querySelector(${JSON.stringify(scrollTo)})
-          const scroller = [...document.querySelectorAll('[data-trello="drawer"] *')].find(e => getComputedStyle(e).overflowY === 'auto')
+          const scroller = document.querySelector('[data-trello="drawer-scroll"]') || [...document.querySelectorAll('[data-trello="drawer"] *')].find(e => getComputedStyle(e).overflowY === 'auto')
+          const tabs = document.querySelector('[data-trello="drawer-tabs"]')
           if (!target || !scroller) return false
-          scroller.scrollTop += target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8
+          scroller.scrollTop += target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8 - (tabs ? tabs.getBoundingClientRect().height : 0)
           return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))
         })()`
       })
@@ -1107,7 +1139,7 @@ function pageProbe() {
         labelsWrapped: labelRow ? rect(labelRow).height > 20 : false,
         chipsTruncated: q('[data-trello="label-chip"]', c).filter(x => x.scrollWidth > x.clientWidth + 1).length,
         chipsTruncatedWithoutTitle: q('[data-trello="label-chip"]', c).filter(x => x.scrollWidth > x.clientWidth + 1 && !x.title).length,
-        metaOverflow: (() => { const m = q('[data-trello="card-open"] > div', c)[0]; return m ? m.scrollWidth > m.clientWidth + 1 : false })(),
+        metaOverflow: (() => { const m = q('[data-trello="card-meta"]', c)[0] || q('[data-trello="card-open"] > div', c)[0]; return m ? m.scrollWidth > m.clientWidth + 1 : false })(),
         due: q('[data-trello^="due-"]', c).length,
         checklist: q('[data-trello="checklist"]', c).length,
         comments: q('[data-trello="comments"]', c).length,
@@ -1193,7 +1225,7 @@ function pageProbe() {
   const drawer = q('[data-trello="drawer"]')[0]
 
   if (drawer) {
-    const scroller = q('*', drawer).find(e => getComputedStyle(e).overflowY === 'auto')
+    const scroller = q('[data-trello="drawer-scroll"]', drawer)[0] || q('*', drawer).find(e => getComputedStyle(e).overflowY === 'auto')
     const top = rect(scroller).top
     const at = sel => { const el = q(sel, drawer)[0]; return el ? { top: rect(el).top - top + scroller.scrollTop, height: rect(el).height } : null }
     const comments = q('[data-trello="comment"]', drawer)
@@ -1203,6 +1235,9 @@ function pageProbe() {
       height: rect(drawer).height,
       headerHeight: rect(q('header', drawer)[0]).height,
       footerHeight: rect(q('footer', drawer)[0]).height,
+      tabs: q('[data-trello="drawer-tabs"]', drawer)[0] ? { height: rect(q('[data-trello="drawer-tabs"]', drawer)[0]).height, tabs: q('[data-trello="drawer-tab"]', drawer).length } : null,
+      itemRows: items.length,
+      buttons: q('button', drawer).length,
       scrollerClientHeight: scroller.clientHeight,
       scrollerScrollHeight: scroller.scrollHeight,
       screens: scroller.scrollHeight / scroller.clientHeight,
@@ -1226,9 +1261,11 @@ function pageProbe() {
 
   if (send && following) {
     const before = rect(following).top
+    const heightBefore = rect(selected).height
 
-    send.parentElement.remove()
+    send.closest('[data-trello="card-actions"]').remove()
     out.selectionShift = before - rect(following).top
+    out.selectedHeightDelta = heightBefore - rect(selected).height
   }
 
   const strip = q('[data-trello="lane-strip"]')[0]
@@ -1301,7 +1338,7 @@ const CV_OFF = '[data-trello="card"]{content-visibility:visible !important}'
 const CV_ON_84 = '[data-trello="card"]{content-visibility:auto !important;contain-intrinsic-size:auto 84px !important}'
 
 async function measureLayout(browser, workDir) {
-  const names = ['pane-columns', 'heavy-columns', 'heavy-compact', 'pane-list', 'heavy-list', 'card-drawer', 'heavy-drawer']
+  const names = ['pane-columns', 'heavy-columns', 'heavy-compact', 'heavy-4-lanes', 'pane-list', 'heavy-list', 'card-drawer', 'heavy-drawer', 'heavy-drawer-pending']
   const out = {}
   const files = {}
 
@@ -1558,6 +1595,8 @@ function buildSummary(r) {
   const col = L['heavy-columns'].probe
   const compact = L['heavy-compact'].probe
   const list = L['heavy-list'].probe
+  const dh = L['heavy-drawer'].probe.drawer
+  const dp = L['heavy-drawer-pending'].probe.drawer
   const natural = { col: L['heavy-columns'].natural, compact: L['heavy-compact'].natural, list: L['heavy-list'].natural }
   const audit = r.domAndMount['heavy-columns'].overflow
   const cv = L.contentVisibility['heavy-columns']
@@ -1594,6 +1633,24 @@ function buildSummary(r) {
     'j presses to the last lane': r.keyboardReach.jToLastLane,
     'l presses to the last lane, from nothing selected': r.keyboardReach.lFromNothing,
     'l presses to the last lane, from a card in lane 1': r.keyboardReach.lFromFirstLane,
+    'selected card height change px': natural.list.selectedHeightDelta === undefined ? null : round(natural.list.selectedHeightDelta, 1),
+    'cards fully visible in the 80-card lane, comfortable, 4 lanes (no strip needed)': L['heavy-4-lanes'].probe.columns.lane1.cardsFullyVisible,
+    'lane strip height px, 4 lanes': L['heavy-4-lanes'].probe.stripHeight,
+    'drawer scroll height px (heavy card)': dh.scrollerScrollHeight,
+    'drawer fixed chrome px (header + footer)': round(dh.headerHeight + dh.footerHeight, 1),
+    'drawer footer height px': round(dh.footerHeight, 1),
+    'drawer sticky tabs px': dh.tabs ? round(dh.tabs.height, 1) : null,
+    'comments section top in the scroll extent px': round(dh.comments.top, 0),
+    'px of manual scrolling to reach the comments (one tab click if tabs exist)': dh.tabs ? 0 : round(dh.comments.top, 0),
+    'description section height px': round(dh.description.height, 0),
+    'checklists section height px, default': round(dh.checklists.height, 0),
+    'checklists section height px, pending only': round(dp.checklists.height, 0),
+    'checklist item rows, default': dh.itemRows,
+    'checklist item rows, pending only': dp.itemRows,
+    'comments section height px': round(dh.comments.height, 0),
+    'drawer nodes (heavy card)': r.drawer.heavy.drawerNodes,
+    'drawer buttons (heavy card)': r.drawer.heavy.buttons,
+    'Markdown blocks rendered when the drawer opens': r.interactions.heavy.openDrawer?.byComponent?.Markdown ?? null,
     'DOM nodes, 207 cards, comfortable': r.domAndMount['heavy-columns'].paneNodes,
     'mount() worst ms, comfortable columns (jsdom, dev React)': round(r.domAndMount['heavy-columns'].worstMountMs, 1)
   }
@@ -1654,7 +1711,7 @@ function printMeasurements(r) {
 
   const dw = k => L[k].probe.drawer
   lines.push(mdTable(['drawer scene', 'nodes', 'scroller clientH', 'scrollH', 'screens', 'description top/height', 'checklists top/height', 'comments top/height', 'attachments top/height', 'activity top/height', 'header+footer px', 'item height median', 'relayout median ms'],
-    ['card-drawer', 'heavy-drawer'].map(k => [k, L[k].probe.nodes, dw(k).scrollerClientHeight, dw(k).scrollerScrollHeight, f(dw(k).screens), ...['description', 'checklists', 'comments', 'attachments', 'activity'].map(s => `${f(dw(k)[s].top, 0)} / ${f(dw(k)[s].height, 0)}`), f(dw(k).headerHeight + dw(k).footerHeight, 0), f(dw(k).itemHeight ? dw(k).itemHeight.median : null), f(L[k].relayout.median, 2)])), '')
+    ['card-drawer', 'heavy-drawer', 'heavy-drawer-pending'].map(k => [k, L[k].probe.nodes, dw(k).scrollerClientHeight, dw(k).scrollerScrollHeight, f(dw(k).screens), ...['description', 'checklists', 'comments', 'attachments', 'activity'].map(s => `${f(dw(k)[s].top, 0)} / ${f(dw(k)[s].height, 0)}`), f(dw(k).headerHeight + dw(k).footerHeight, 0), f(dw(k).itemHeight ? dw(k).itemHeight.median : null), f(L[k].relayout.median, 2)])), '')
 
   const nz = k => L[k].probe.noise
   lines.push('## Visual density per card (real Chromium; shares are of card height)', '')

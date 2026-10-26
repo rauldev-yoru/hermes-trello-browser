@@ -103,6 +103,7 @@ const EN = {
   palette: { open: 'Open Trello' },
   common: {
     retry: 'Retry',
+    cancel: 'Cancel',
     close: 'Close',
     add: 'Add',
     refresh: 'Refresh',
@@ -200,7 +201,17 @@ const EN = {
     archiveBody: 'It will disappear from the board. You can restore it from Trello.',
     suggest: 'Suggest checklist',
     suggestInserted: 'Prompt inserted — press Enter to run it.',
-    openAttachment: 'Open attachment'
+    openAttachment: 'Open attachment',
+    sections: 'Sections',
+    files: 'Files',
+    showMore: 'Show more',
+    showLess: 'Show less',
+    moreComments: n => `Show ${n} more`,
+    olderInTrello: 'Older comments are in Trello',
+    pendingOnly: 'Pending only',
+    allDone: 'Every item is done.',
+    confirmDelete: 'Delete this item?',
+    confirmDeleteYes: 'Delete'
   },
   send: {
     inserted: 'Card inserted into the composer.',
@@ -267,6 +278,7 @@ const ES = {
   palette: { open: 'Abrir Trello' },
   common: {
     retry: 'Reintentar',
+    cancel: 'Cancelar',
     close: 'Cerrar',
     add: 'Añadir',
     refresh: 'Actualizar',
@@ -364,7 +376,17 @@ const ES = {
     archiveBody: 'Desaparecerá del tablero. Puedes restaurarla desde Trello.',
     suggest: 'Sugerir checklist',
     suggestInserted: 'Prompt insertado — pulsa Enter para ejecutarlo.',
-    openAttachment: 'Abrir adjunto'
+    openAttachment: 'Abrir adjunto',
+    sections: 'Secciones',
+    files: 'Archivos',
+    showMore: 'Mostrar más',
+    showLess: 'Mostrar menos',
+    moreComments: n => `Mostrar ${n} más`,
+    olderInTrello: 'Los comentarios anteriores están en Trello',
+    pendingOnly: 'Solo pendientes',
+    allDone: 'Todos los ítems están listos.',
+    confirmDelete: '¿Borrar este ítem?',
+    confirmDeleteYes: 'Borrar'
   },
   send: {
     inserted: 'Card insertada en el compositor.',
@@ -730,6 +752,100 @@ export function resolveBoardId(boards, current, fallback) {
 export const modeForWidth = width => (Number(width) >= COLUMNS_MIN_WIDTH ? 'columns' : 'list')
 
 /** Lane width for the columns layout, tracked from the measured container width. */
+// -- drawer helpers (pure, exported for tests) --------------------------------
+
+/** The API returns at most this many comments; getting exactly this many means there may be older ones. */
+export const COMMENT_LIMIT = 20
+export const COMMENTS_PREVIEW = 3
+export const DESCRIPTION_CLAMP_LINES = 14
+export const COMMENT_CLAMP_LINES = 6
+
+/** How long a ticked item stays in the "pending only" list, struck through, before it leaves (ms). */
+export const PENDING_SETTLE_MS = 1200
+
+/** Drawer sections in reading order: the id the tab uses, the `data-trello` of its section, and its title key. */
+export const DRAWER_SECTIONS = Object.freeze([
+  Object.freeze({ id: 'description', target: 'description', label: 'drawer.description' }),
+  Object.freeze({ id: 'checklists', target: 'checklists', label: 'drawer.checklists' }),
+  Object.freeze({ id: 'comments', target: 'comments', label: 'drawer.comments' }),
+  Object.freeze({ id: 'files', target: 'attachments', label: 'drawer.files' }),
+  Object.freeze({ id: 'activity', target: 'activity', label: 'drawer.activity' })
+])
+
+/** Newest first. Comments without a usable date keep the order the API gave them. */
+export function recentComments(comments) {
+  const list = Array.isArray(comments) ? comments : []
+  const stamp = c => Date.parse(c && c.date) || 0
+
+  return list
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => stamp(b.c) - stamp(a.c) || a.i - b.i)
+    .map(x => x.c)
+}
+
+/** Rough number of wrapped lines a text takes (used only where there is no layout to measure). */
+export function estimateLines(text, charsPerLine = 52) {
+  const source = String(text || '')
+
+  if (!source.trim()) {
+    return 0
+  }
+
+  return source.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / charsPerLine)), 0)
+}
+
+/** Done / total items over every checklist of a card detail. */
+export function checklistTotals(detail) {
+  const items = ((detail && detail.checklists) || []).flatMap(cl => cl.items || [])
+
+  return { done: items.filter(i => i.state === 'complete').length, total: items.length }
+}
+
+/** Which section is "current" given each section's top relative to the scroller; the last one that has reached `offset`. */
+export function activeSection(tops, offset, atBottom = false) {
+  if (!tops.length) {
+    return null
+  }
+
+  if (atBottom) {
+    return tops[tops.length - 1].id
+  }
+
+  let current = tops[0].id
+
+  for (const entry of tops) {
+    if (entry.top <= offset) {
+      current = entry.id
+    }
+  }
+
+  return current
+}
+
+/** What each drawer tab counts. The description has no count; checklists show done/total over every item. */
+export function tabCounts(detail) {
+  const { done, total } = checklistTotals(detail)
+
+  return {
+    checklists: total ? `${done}/${total}` : 0,
+    comments: (detail.comments || []).length,
+    files: (detail.attachments || []).length,
+    activity: activityRows(detail).length
+  }
+}
+
+/** Items to draw for a checklist: all of them, or the pending ones plus the ones ticked a moment ago (`pinned`). */
+export function visibleChecklistItems(items, pendingOnly, pinned) {
+  return pendingOnly ? items.filter(i => i.state !== 'complete' || (pinned && pinned.has(i.id))) : items
+}
+
+/** Do all the lanes fit side by side in the container (lane widths + 10 px gaps + 12 px padding on each side)? */
+export function lanesFit(containerWidth, laneCount) {
+  const n = Math.max(0, Math.floor(Number(laneCount) || 0))
+
+  return n * laneWidth(containerWidth, n) + Math.max(0, n - 1) * 10 + 24 <= Number(containerWidth)
+}
+
 export function laneWidth(containerWidth, laneCount) {
   const visible = Math.max(1, Math.min(laneCount, 3))
   const fit = Math.floor((Number(containerWidth) - 24 - 10 * (visible - 1)) / visible)
@@ -1579,6 +1695,16 @@ function renderInline(nodes, prefix) {
   })
 }
 
+/** Heading levels by size and weight (one entry per `#` count): `#` is the biggest, `####` and below read as bold body text. */
+const HEADING_LOOK = Object.freeze([
+  Object.freeze({ size: '1.125rem', weight: 700, line: '1.5rem', top: '0.25rem' }),
+  Object.freeze({ size: '1rem', weight: 700, line: '1.375rem', top: '0.25rem' }),
+  Object.freeze({ size: '0.875rem', weight: 600, line: '1.25rem', top: '0.125rem' }),
+  Object.freeze({ size: '0.8125rem', weight: 600, line: '1.125rem', top: 0 }),
+  Object.freeze({ size: '0.8125rem', weight: 600, line: '1.125rem', top: 0 }),
+  Object.freeze({ size: '0.8125rem', weight: 600, line: '1.125rem', top: 0 })
+])
+
 /** Safe markdown subset rendered as React elements: never an HTML string. */
 /** Memoized by text: a re-render of the drawer must not parse the description and every comment again. */
 const Markdown = memo(function Markdown({ text }) {
@@ -1593,7 +1719,9 @@ const Markdown = memo(function Markdown({ text }) {
       }
 
       if (b.type === 'heading') {
-        return h('div', { key: i, style: { fontWeight: 600 } }, ...renderInline(parseInline(b.text), `h${i}.`))
+        const look = HEADING_LOOK[Math.min(Math.max(Number(b.level) || 1, 1), 6) - 1]
+
+        return h('div', { key: i, role: 'heading', 'aria-level': b.level, 'data-level': b.level, style: { fontWeight: look.weight, fontSize: look.size, lineHeight: look.line, marginTop: look.top } }, ...renderInline(parseInline(b.text), `h${i}.`))
       }
 
       if (b.type === 'list') {
@@ -1618,11 +1746,11 @@ const Markdown = memo(function Markdown({ text }) {
 
 // -- small pieces -----------------------------------------------------------
 
-function IconButton({ icon, label, onClick, disabled, spinning, children }) {
+function IconButton({ icon, label, onClick, disabled, spinning, style, children }) {
   return h(
     Tip,
     { label },
-    h(Button, { 'aria-label': label, disabled, onClick, size: 'icon-xs', type: 'button', variant: 'ghost' }, h(Codicon, { name: icon, spinning: Boolean(spinning) }), children)
+    h(Button, { 'aria-label': label, disabled, onClick, size: 'icon-xs', style, type: 'button', variant: 'ghost' }, h(Codicon, { name: icon, spinning: Boolean(spinning) }), children)
   )
 }
 
@@ -1651,7 +1779,7 @@ function CardLabels({ labels, boardLabels, compact }) {
 }
 
 /** Up to MAX_CARD_AVATARS people, then a `+N` chip whose `title` names the rest. Nobody is dropped silently. */
-function Avatars({ ids, members, compact = false }) {
+function Avatars({ ids, members, compact = false, hidden: concealed = false }) {
   const people = ids.map(id => members.find(m => m.id === id)).filter(Boolean)
   const shown = people.slice(0, MAX_CARD_AVATARS)
   const hiddenCount = ids.length - shown.length
@@ -1665,7 +1793,7 @@ function Avatars({ ids, members, compact = false }) {
 
   return h(
     'span',
-    { 'data-trello': 'avatars', style: st(ROW, { marginLeft: 'auto', gap: '0.125rem', flexShrink: 0 }) },
+    { 'data-trello': 'avatars', style: st(ROW, { gap: '0.125rem', flexShrink: 0, visibility: concealed ? 'hidden' : 'visible' }) },
     ...shown.map(p => h('span', { key: p.id, title: p.full_name || p.username, style: { width: size, height: size, borderRadius: '50%', display: 'grid', placeItems: 'center', fontSize: compact ? '0.5rem' : '0.5625rem', border: HAIRLINE, color: 'var(--ui-text-tertiary)' } }, p.initials || '?')),
     hiddenCount > 0 && h('span', { 'data-trello': 'avatars-more', title: hiddenNames.length ? hiddenNames.join(', ') : String(hiddenCount), style: st({ height: size, minWidth: size, borderRadius: '999px', display: 'grid', placeItems: 'center', fontSize: compact ? '0.5rem' : '0.5625rem', padding: '0 0.25rem', border: HAIRLINE, color: 'var(--ui-text-tertiary)' }) }, `+${hiddenCount}`)
   )
@@ -1685,27 +1813,44 @@ function DueChip({ card, compact = false }) {
   return h('span', { 'data-trello': `due-${info.kind}`, title, style: st(SMALL, { border: `1px solid var(${cssVar})`, color: `var(${cssVar})`, borderRadius: '4px', padding: '0 0.3125rem', lineHeight: compact ? '0.875rem' : undefined, textDecoration: info.kind === 'done' ? 'line-through' : 'none', whiteSpace: 'nowrap', flexShrink: 0 }) }, formatDate(card.due))
 }
 
-/** Due date, checklist, comments and attachments on one row with the avatars (wraps only when it cannot fit). */
-function CardMeta({ card, members, compact }) {
+/** Height of a card's meta row. The actions are as tall, so showing them changes nothing. */
+const CARD_META_ROW = Object.freeze({ comfortable: '1.125rem', compact: '1rem' })
+
+/** Width reserved at the right of the meta row: three action buttons side by side (3 x 1.125rem + gaps). */
+const CARD_ACTIONS_WIDTH = '3.75rem'
+
+/**
+ * Due date, checklist, comments and attachments on the left; the people (or, on hover / selection, the card's
+ * actions) on the right. The right slot always keeps the width of the avatars, which stay in the flow (hidden while
+ * the actions are shown) and the actions sit on top of that same box: nothing reflows, the height never changes,
+ * and the actions cover only the avatars, never text. This row is a sibling of the title button, not inside it.
+ */
+function CardMeta({ card, members, compact, onOpen, actions }) {
   const { total, done } = card.checklist
+  const gap = compact ? '0.5rem' : '0.625rem'
 
   return h(
     'div',
-    { style: st({ display: 'flex', alignItems: 'center', minWidth: 0 }, MUTED, SMALL, { columnGap: compact ? '0.5rem' : '0.625rem', rowGap: 0, flexWrap: 'wrap' }) },
+    { 'data-trello': 'card-meta', onClick: onOpen, style: st({ display: 'flex', alignItems: 'center', flexWrap: 'wrap', minWidth: 0, minHeight: CARD_META_ROW[compact ? 'compact' : 'comfortable'], columnGap: gap, rowGap: 0, cursor: 'pointer' }, MUTED, SMALL) },
     h(DueChip, { card, compact }),
     total > 0 && h('span', { 'data-trello': 'checklist', style: { fontVariantNumeric: 'tabular-nums' } }, `☑ ${done}/${total}`),
     card.comment_count > 0 && h('span', { 'data-trello': 'comments' }, `💬 ${card.comment_count}`),
     card.attachment_count > 0 && h('span', { 'data-trello': 'attachments' }, `📎 ${card.attachment_count}`),
-    h(Avatars, { ids: card.id_members, members, compact })
+    h(
+      'span',
+      { 'data-trello': 'card-slot', style: { position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginLeft: 'auto', minWidth: CARD_ACTIONS_WIDTH, flexShrink: 0, alignSelf: 'stretch', cursor: 'default' } },
+      h(Avatars, { ids: card.id_members, members, compact, hidden: Boolean(actions) }),
+      actions
+    )
   )
 }
 
-function MoveMenu({ lists, card, onMove, children }) {
+function MoveMenu({ lists, card, onMove, onOpenChange, children }) {
   const t = usePluginI18n(ID)
 
   return h(
     DropdownMenu,
-    null,
+    { onOpenChange },
     h(DropdownMenuTrigger, { asChild: true }, children),
     h(
       DropdownMenuContent,
@@ -1745,6 +1890,8 @@ const CardRow = memo(function CardRow({ card, boardLabels, members, lists, densi
   const t = usePluginI18n(ID)
   const selected = useIsSelected(card.id)
   const [hot, setHot] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const ref = useRef(null)
   const compact = density === 'compact'
 
@@ -1764,6 +1911,25 @@ const CardRow = memo(function CardRow({ card, boardLabels, members, lists, densi
     handoffCard(card.id, { submit: Boolean(event.shiftKey) || RT.store.settings.get().sendMode === 'submit' })
   }
 
+  // hover, the selection, keyboard focus (not a mouse click) and an open menu all show the actions
+  const showActions = hot || selected || focused || menuOpen
+  const side = compact ? '1rem' : '1.125rem'
+  const tile = { width: side, height: side, minWidth: side, padding: 0 }
+
+  const actions =
+    showActions &&
+    h(
+      'div',
+      { 'data-trello': 'card-actions', onClick: event => event.stopPropagation(), style: st(ROW, { position: 'absolute', top: 0, right: 0, bottom: 0, gap: '0.125rem', background: selected ? mix('--ui-accent', 8) : 'var(--ui-bg-tertiary)' }) },
+      h(Tip, { label: t('card.sendHint') }, h(Button, { 'aria-label': t('card.sendToAgent'), 'data-trello': 'send', onClick: send, size: 'icon-xs', style: tile, type: 'button', variant: 'secondary' }, h(Codicon, { name: 'send' }))),
+      h(IconButton, { icon: 'link-external', label: t('common.openInTrello'), onClick: () => card.url && openLink(card.url), style: tile }),
+      h(
+        MoveMenu,
+        { lists, card, onMove, onOpenChange: setMenuOpen },
+        h(Button, { 'aria-label': t('card.menu'), size: 'icon-xs', style: tile, type: 'button', variant: 'ghost' }, h(Codicon, { name: 'ellipsis' }))
+      )
+    )
+
   return h(
     'article',
     {
@@ -1772,6 +1938,22 @@ const CardRow = memo(function CardRow({ card, boardLabels, members, lists, densi
       'data-card-id': card.id,
       'data-density': compact ? 'compact' : 'comfortable',
       'data-selected': selected ? 'true' : 'false',
+      onBlur: event => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setFocused(false)
+        }
+      },
+      onFocus: event => {
+        let visible = false
+
+        try {
+          visible = event.target.matches(':focus-visible')
+        } catch {
+          visible = false
+        }
+
+        setFocused(visible)
+      },
       onMouseEnter: () => setHot(true),
       onMouseLeave: () => setHot(false),
       style: st(FILL, {
@@ -1791,22 +1973,10 @@ const CardRow = memo(function CardRow({ card, boardLabels, members, lists, densi
       'button',
       { type: 'button', onClick: open, 'data-trello': 'card-open', style: st(FILL, { gap: compact ? '0.125rem' : '0.375rem', textAlign: 'left', background: 'transparent', border: 0, padding: 0, color: 'inherit', cursor: 'pointer', font: 'inherit' }) },
       h('span', { title: card.name, style: { fontWeight: 500, fontSize: '0.8125rem', lineHeight: compact ? '1.125rem' : undefined, display: '-webkit-box', WebkitLineClamp: compact ? 1 : 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere' } }, card.name),
-      card.labels.length > 0 && h(CardLabels, { labels: card.labels, boardLabels, compact }),
-      h(CardMeta, { card, members, compact })
+      card.labels.length > 0 && h(CardLabels, { labels: card.labels, boardLabels, compact })
     ),
-    // an overlay, not a row: showing it never changes the card's height, so nothing below it moves
-    (hot || selected) &&
-      h(
-        'div',
-        { 'data-trello': 'card-actions', style: st(ROW, { position: 'absolute', top: '0.25rem', right: '0.25rem', zIndex: 1, gap: '0.25rem', padding: '0.125rem', borderRadius: '6px', border: HAIRLINE, background: 'var(--ui-bg-elevated)' }) },
-        h(Tip, { label: t('card.sendHint') }, h(Button, { 'data-trello': 'send', onClick: send, size: 'xs', type: 'button', variant: 'secondary' }, h(Codicon, { name: 'send' }), t('card.sendToAgent'))),
-        h(IconButton, { icon: 'link-external', label: t('common.openInTrello'), onClick: () => card.url && openLink(card.url) }),
-        h(
-          MoveMenu,
-          { lists, card, onMove },
-          h(Button, { 'aria-label': t('card.menu'), size: 'icon-xs', type: 'button', variant: 'ghost' }, h(Codicon, { name: 'ellipsis' }))
-        )
-      )
+    // the same row as the avatars: the actions take their place on hover / selection, so the card never grows
+    h(CardMeta, { actions, card, compact, members, onOpen: open })
   )
 })
 
@@ -2040,10 +2210,13 @@ function Columns({ view, grouped, width, density, boardActions }) {
     setOnScreen(new Set([id]))
   }
 
+  // the strip is an index for boards that scroll sideways: with every lane on screen it would only cost height
+  const needsStrip = !lanesFit(width, view.lists.length)
+
   return h(
     'div',
     { style: st(FILL, { flex: 1 }) },
-    h(LaneStrip, { activeIds: onScreen, grouped, lists: view.lists, mode: 'columns', onPick: jump }),
+    needsStrip && h(LaneStrip, { activeIds: onScreen, grouped, lists: view.lists, mode: 'columns', onPick: jump }),
     h(
       'div',
       { 'data-trello': 'columns', ref: scrollRef, style: st({ flex: 1, minHeight: 0, display: 'flex', gap: '0.625rem', padding: '0.75rem', overflowX: 'auto', overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: 'var(--ui-stroke-secondary) transparent', alignItems: 'stretch' }) },
@@ -2397,15 +2570,27 @@ function InlineAdd({ label, placeholder, onSubmit, busy }) {
     'div',
     { style: st(ROW, { gap: '0.25rem' }) },
     h(Input, { 'aria-label': placeholder, disabled: busy, onChange: e => setValue(e.target.value), onKeyDown: e => { if (isSubmitEnter(e)) submit() }, placeholder, value }),
-    h(Button, { disabled: busy || !value.trim(), onClick: submit, size: 'xs', type: 'button', variant: 'secondary' }, label)
+    // Enter submits; the button shows up once there is something to add
+    value.trim() && h(Button, { disabled: busy, onClick: submit, size: 'xs', type: 'button', variant: 'secondary' }, label)
   )
 }
 
-/** Memoized: ticking one item renders that item, not the other 59. `itemActions` is built once per checklist section. */
+/** An icon button the size of the row's text line, so showing it never makes the row taller. */
+const ITEM_TILE = Object.freeze({ width: '1.25rem', height: '1.25rem', minWidth: '1.25rem', padding: 0 })
+
+/**
+ * One checklist item. Memoized: ticking one item renders that item, not the other 59. `itemActions` is built once per
+ * checklist section. Edit and delete are not drawn at rest (they were two permanent buttons per item): they appear on
+ * hover, on keyboard focus anywhere in the row, and after a tap on the text (touch). Deleting asks inline first.
+ */
 const ItemRow = memo(function ItemRow({ cardId, checklistId, item, itemActions }) {
   const t = usePluginI18n(ID)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(item.name)
+  const [hot, setHot] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [tapped, setTapped] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const done = item.state === 'complete'
 
   const save = () => {
@@ -2417,55 +2602,211 @@ const ItemRow = memo(function ItemRow({ cardId, checklistId, item, itemActions }
     }
   }
 
+  const startEdit = () => {
+    setDraft(item.name)
+    setEditing(true)
+  }
+
+  const showTools = (hot || focused || tapped) && !editing && !confirming
+
   return h(
     'div',
-    { 'data-trello': 'item', 'data-state': item.state, style: st(ROW, { alignItems: 'flex-start', padding: '0.125rem 0' }) },
+    {
+      'data-trello': 'item',
+      'data-state': item.state,
+      onBlur: event => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setFocused(false)
+          setTapped(false)
+        }
+      },
+      onFocus: () => setFocused(true),
+      onKeyDown: event => {
+        if (event.key === 'Escape' && confirming) {
+          event.stopPropagation()
+          setConfirming(false)
+        }
+      },
+      onMouseEnter: () => setHot(true),
+      onMouseLeave: () => {
+        setHot(false)
+        setTapped(false)
+      },
+      style: st(ROW, { alignItems: 'center', minHeight: '1.5rem' })
+    },
     h(Checkbox, { 'aria-label': item.name, checked: done, onCheckedChange: value => itemActions.toggle(cardId, checklistId, item.id, value ? 'complete' : 'incomplete') }),
     editing
       ? h(Input, { autoFocus: true, 'aria-label': t('drawer.renameItem'), onBlur: save, onChange: e => setDraft(e.target.value), onKeyDown: e => { if (isSubmitEnter(e)) save(); else if (e.key === 'Escape') { setDraft(item.name); setEditing(false) } }, value: draft })
-      : h('span', { onDoubleClick: () => { setDraft(item.name); setEditing(true) }, style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere', cursor: 'text', textDecoration: done ? 'line-through' : 'none', color: done ? 'var(--ui-text-tertiary)' : 'inherit' } }, item.name),
-    h(IconButton, { icon: 'edit', label: t('drawer.renameItem'), onClick: () => { setDraft(item.name); setEditing(true) } }),
-    h(IconButton, { icon: 'trash', label: t('drawer.deleteItem'), onClick: () => itemActions.remove(cardId, checklistId, item.id) })
+      : h('span', { onClick: () => setTapped(v => !v), onDoubleClick: startEdit, style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere', cursor: 'text', textDecoration: done ? 'line-through' : 'none', color: done ? 'var(--ui-text-tertiary)' : 'inherit' } }, item.name),
+    showTools &&
+      h(
+        'span',
+        { 'data-trello': 'item-tools', style: st(ROW, { gap: '0.125rem', flexShrink: 0 }) },
+        h(IconButton, { icon: 'edit', label: t('drawer.renameItem'), onClick: startEdit, style: ITEM_TILE }),
+        h(IconButton, { icon: 'trash', label: t('drawer.deleteItem'), onClick: () => setConfirming(true), style: ITEM_TILE })
+      ),
+    // Inline confirmation instead of an undo toast: an undo can only re-create the item (new position, ticked state
+    // lost) and depends on the host showing actionable toasts; asking first loses nothing and works with the keyboard.
+    confirming &&
+      h(
+        'span',
+        { 'data-trello': 'item-confirm', role: 'group', 'aria-label': t('drawer.confirmDelete'), style: st(ROW, SMALL, { gap: '0.25rem', flexShrink: 0 }) },
+        h('span', { style: MUTED }, t('drawer.confirmDelete')),
+        h(Button, { 'data-trello': 'item-delete-confirm', onClick: () => { setConfirming(false); itemActions.remove(cardId, checklistId, item.id) }, size: 'xs', type: 'button', variant: 'outline' }, t('drawer.confirmDeleteYes')),
+        h(Button, { autoFocus: true, 'data-trello': 'item-delete-cancel', onClick: () => setConfirming(false), size: 'xs', type: 'button', variant: 'ghost' }, t('common.cancel'))
+      )
   )
 })
 
-function ChecklistSection({ detail, cardId, actions }) {
+/** One checklist: collapse toggle, name, progress bar and count; its items; the add-item field. */
+function ChecklistBlock({ checklist, cardId, actions, itemActions, pendingOnly, pinned }) {
+  const t = usePluginI18n(ID)
+  const total = checklist.items.length
+  const done = checklist.items.filter(i => i.state === 'complete').length
+  const finished = total > 0 && done === total
+  // decided once, when the checklist first appears: ticking the last item must not fold it under the pointer
+  const [open, setOpen] = useState(() => !finished)
+  const items = visibleChecklistItems(checklist.items, pendingOnly, pinned)
+  const percent = total ? Math.round((done / total) * 100) : 0
+
+  return h(
+    'div',
+    { 'data-trello': 'checklist', 'data-open': open ? 'true' : 'false', style: st(FILL, { gap: '0.125rem', marginBottom: '0.5rem' }) },
+    h(
+      'button',
+      { 'aria-expanded': open, 'data-trello': 'checklist-toggle', onClick: () => setOpen(v => !v), type: 'button', style: st(ROW, { gap: '0.375rem', width: '100%', background: 'transparent', border: 0, padding: '0.125rem 0', color: 'inherit', cursor: 'pointer', font: 'inherit', fontWeight: 600, fontSize: '0.75rem', textAlign: 'left' }) },
+      h(Codicon, { name: open ? 'chevron-down' : 'chevron-right' }),
+      h('span', { className: 'truncate', style: { flex: 1, minWidth: 0 } }, checklist.name),
+      h(
+        'span',
+        { 'aria-valuemax': total, 'aria-valuemin': 0, 'aria-valuenow': done, 'data-trello': 'progress', role: 'progressbar', style: { flexShrink: 0, width: '3.5rem', height: '0.25rem', borderRadius: '2px', background: 'var(--ui-stroke-tertiary)', overflow: 'hidden' } },
+        h('span', { style: { display: 'block', width: `${percent}%`, height: '100%', background: finished ? 'var(--ui-green)' : 'var(--ui-accent)' } })
+      ),
+      h('span', { style: st(MUTED, { fontVariantNumeric: 'tabular-nums', flexShrink: 0 }) }, `${done}/${total}`)
+    ),
+    open && pendingOnly && finished && items.length === 0 && h('div', { style: st(MUTED, SMALL) }, t('drawer.allDone')),
+    open && items.map(item => h(ItemRow, { key: item.id, cardId, checklistId: checklist.id, item, itemActions })),
+    open && h(InlineAdd, { busy: actions.addItem.isPending, label: t('drawer.addItem'), onSubmit: name => actions.addItem.mutate({ cardId, checklistId: checklist.id, name }), placeholder: t('drawer.itemPlaceholder') })
+  )
+}
+
+function ChecklistSection({ detail, cardId, actions, pendingOnly, onPendingOnly }) {
   const t = usePluginI18n(ID)
   const latest = useLatest(actions)
+  const pendingRef = useLatest(pendingOnly)
+  const [pinned, setPinned] = useState(() => new Set())
+  const cancels = useRef(new Set())
+
+  // items ticked while "pending only" is on stay (struck through) for a moment instead of vanishing under the pointer
+  const pin = useCallback(
+    itemId => {
+      setPinned(prev => new Set(prev).add(itemId))
+
+      const cancel = RT.ctx.setTimeout(() => {
+        setPinned(prev => {
+          if (!prev.has(itemId)) {
+            return prev
+          }
+
+          const next = new Set(prev)
+          next.delete(itemId)
+
+          return next
+        })
+      }, PENDING_SETTLE_MS)
+
+      if (typeof cancel === 'function') {
+        cancels.current.add(cancel)
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    const pending = cancels.current
+
+    return () => pending.forEach(cancel => cancel())
+  }, [])
+
+  useEffect(() => {
+    setPinned(prev => (prev.size ? new Set() : prev))
+  }, [pendingOnly])
 
   // built once, reaching the current mutation objects through the ref, so the item rows can be memoized
   const itemActions = useMemo(
     () => ({
-      toggle: (card, checklistId, itemId, state) => latest.current.toggle.mutate({ cardId: card, checklistId, itemId, state }),
+      toggle: (card, checklistId, itemId, state) => {
+        if (pendingRef.current && state === 'complete') {
+          pin(itemId)
+        }
+
+        latest.current.toggle.mutate({ cardId: card, checklistId, itemId, state })
+      },
       rename: (card, checklistId, itemId, name) => latest.current.renameItem.mutate({ cardId: card, checklistId, itemId, name }),
       remove: (card, checklistId, itemId) => latest.current.deleteItem.mutate({ cardId: card, checklistId, itemId })
     }),
-    [latest]
+    [latest, pendingRef, pin]
   )
 
   return h(
     'section',
     { 'data-trello': 'checklists' },
-    h(SectionTitle, null, t('drawer.checklists')),
+    h(
+      'div',
+      { style: st(ROW, { justifyContent: 'space-between' }) },
+      h(SectionTitle, null, t('drawer.checklists')),
+      detail.checklists.length > 0 && h('label', { 'data-trello': 'pending-only', style: st(ROW, SMALL, MUTED, { gap: '0.25rem', cursor: 'pointer' }) }, h(Checkbox, { 'aria-label': t('drawer.pendingOnly'), checked: pendingOnly, onCheckedChange: value => onPendingOnly(Boolean(value)) }), t('drawer.pendingOnly'))
+    ),
     detail.checklists.length === 0 && h('div', { style: st(MUTED, SMALL) }, t('drawer.noChecklists')),
-    ...detail.checklists.map(cl => {
-      const done = cl.items.filter(i => i.state === 'complete').length
-
-      return h(
-        'div',
-        { key: cl.id, 'data-trello': 'checklist', style: st(FILL, { gap: '0.125rem', marginBottom: '0.625rem' }) },
-        h('div', { style: st(ROW, { justifyContent: 'space-between', fontWeight: 600, fontSize: '0.75rem' }) }, h('span', null, cl.name), h('span', { style: st(MUTED, { fontVariantNumeric: 'tabular-nums' }) }, `${done}/${cl.items.length}`)),
-        ...cl.items.map(item => h(ItemRow, { key: item.id, cardId, checklistId: cl.id, item, itemActions })),
-        h(InlineAdd, { busy: actions.addItem.isPending, label: t('drawer.addItem'), onSubmit: name => actions.addItem.mutate({ cardId, checklistId: cl.id, name }), placeholder: t('drawer.itemPlaceholder') })
-      )
-    }),
+    ...detail.checklists.map(cl => h(ChecklistBlock, { key: cl.id, actions, cardId, checklist: cl, itemActions, pendingOnly, pinned })),
     h(InlineAdd, { busy: actions.addChecklist.isPending, label: t('drawer.addChecklist'), onSubmit: name => actions.addChecklist.mutate({ cardId, name }), placeholder: t('drawer.checklistName') })
   )
 }
 
-function CommentsSection({ detail, cardId, actions }) {
+/**
+ * Clamp long content to a number of lines with a Show more / Show less button. The button only exists when the content
+ * really overflows: measured where there is a layout, estimated from the text length where there is none.
+ */
+function Clamp({ text, lines, name, children }) {
+  const t = usePluginI18n(ID)
+  const ref = useRef(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflows, setOverflows] = useState(() => estimateLines(text) > lines)
+
+  useEffect(() => {
+    const el = ref.current
+
+    if (expanded || !el) {
+      return
+    }
+
+    setOverflows(el.clientHeight > 0 ? el.scrollHeight > el.clientHeight + 1 : estimateLines(text) > lines)
+  }, [text, lines, expanded])
+
+  return h(
+    'div',
+    { 'data-trello': `${name}-clamp`, style: st(FILL, { gap: '0.125rem', alignItems: 'flex-start' }) },
+    h('div', { ref, 'data-clamped': overflows && !expanded ? 'true' : 'false', style: { width: '100%', lineHeight: '1.25rem', overflow: expanded ? 'visible' : 'hidden', maxHeight: expanded ? undefined : `${lines * 1.25}rem` } }, children),
+    overflows && h(Button, { 'aria-expanded': expanded, 'data-trello': `${name}-toggle`, onClick: () => setExpanded(v => !v), size: 'xs', type: 'button', variant: 'text' }, expanded ? t('drawer.showLess') : t('drawer.showMore'))
+  )
+}
+
+const Comment = memo(function Comment({ comment }) {
+  return h(
+    'div',
+    { 'data-trello': 'comment', style: st(FILL, { gap: '0.125rem', border: HAIRLINE, borderRadius: '7px', padding: '0.375rem 0.5rem' }) },
+    h('div', { style: st(ROW, SMALL, { justifyContent: 'space-between' }) }, h('b', { style: { fontWeight: 600 } }, comment.author || '?'), h('span', { style: MUTED }, formatDate(comment.date, true))),
+    h(Clamp, { lines: COMMENT_CLAMP_LINES, name: 'comment', text: comment.text }, h(Markdown, { text: comment.text }))
+  )
+})
+
+function CommentsSection({ detail, cardId, card, actions }) {
   const t = usePluginI18n(ID)
   const [text, setText] = useState('')
+  const [all, setAll] = useState(false)
+  const ordered = useMemo(() => recentComments(detail.comments), [detail.comments])
+  const shown = all ? ordered : ordered.slice(0, COMMENTS_PREVIEW)
+  const hidden = ordered.length - shown.length
 
   const post = () => {
     const body = text.trim()
@@ -2483,16 +2824,19 @@ function CommentsSection({ detail, cardId, actions }) {
       'div',
       { style: st(FILL, { gap: '0.375rem' }) },
       h(Textarea, { 'aria-label': t('drawer.commentPlaceholder'), onChange: e => setText(e.target.value), placeholder: t('drawer.commentPlaceholder'), rows: 2, value: text }),
-      h('div', null, h(Button, { disabled: actions.comment.isPending || !text.trim(), onClick: post, size: 'xs', type: 'button', variant: 'secondary' }, t('drawer.postComment'))),
+      text.trim() && h('div', null, h(Button, { disabled: actions.comment.isPending, onClick: post, size: 'xs', type: 'button', variant: 'secondary' }, t('drawer.postComment'))),
       detail.comments.length === 0 && h('div', { style: st(MUTED, SMALL) }, t('drawer.noComments')),
-      ...detail.comments.map(c =>
+      ...shown.map(c => h(Comment, { key: c.id, comment: c })),
+      hidden > 0 && h('div', null, h(Button, { 'data-trello': 'comments-more', onClick: () => setAll(true), size: 'xs', type: 'button', variant: 'outline' }, t('drawer.moreComments', hidden))),
+      all && ordered.length > COMMENTS_PREVIEW && h('div', null, h(Button, { 'data-trello': 'comments-less', onClick: () => setAll(false), size: 'xs', type: 'button', variant: 'text' }, t('drawer.showLess'))),
+      // the API gives at most COMMENT_LIMIT comments and cannot say whether there were more
+      detail.comments.length >= COMMENT_LIMIT &&
         h(
           'div',
-          { key: c.id, 'data-trello': 'comment', style: st(FILL, { gap: '0.125rem', border: HAIRLINE, borderRadius: '7px', padding: '0.375rem 0.5rem' }) },
-          h('div', { style: st(ROW, SMALL, { justifyContent: 'space-between' }) }, h('b', { style: { fontWeight: 600 } }, c.author || '?'), h('span', { style: MUTED }, formatDate(c.date, true))),
-          h(Markdown, { text: c.text })
+          { 'data-trello': 'comments-older', style: st(ROW, SMALL, MUTED, { flexWrap: 'wrap', gap: '0.375rem' }) },
+          t('drawer.olderInTrello'),
+          card && card.url && h(Button, { onClick: () => openLink(card.url), size: 'xs', type: 'button', variant: 'text' }, h(Codicon, { name: 'link-external' }), t('common.openInTrello'))
         )
-      )
     )
   )
 }
@@ -2509,8 +2853,10 @@ function AttachmentsSection({ detail }) {
       h(
         'div',
         { key: a.id, style: st(ROW, { justifyContent: 'space-between' }) },
-        h('span', { className: 'truncate' }, a.name || a.url || '?'),
-        a.url && h(IconButton, { icon: 'link-external', label: `${t('drawer.openAttachment')}: ${a.name}`, onClick: () => openLink(a.url) })
+        a.url
+          ? h('a', { 'aria-label': `${t('drawer.openAttachment')}: ${a.name || a.url}`, className: 'truncate', href: a.url, onClick: e => { e.preventDefault(); openLink(a.url) }, rel: 'noreferrer noopener', style: { color: 'var(--ui-accent)', cursor: 'pointer', minWidth: 0 }, title: a.name || a.url }, a.name || a.url)
+          : h('span', { className: 'truncate' }, a.name || '?'),
+        a.url && h(Codicon, { name: 'link-external' })
       )
     )
   )
@@ -2578,10 +2924,44 @@ function LabelEditor({ view, card, actions }) {
   )
 }
 
+/** Sticky row of section tabs with counts. A click scrolls the drawer's own scroller; the current section is lit. */
+function DrawerTabs({ counts, active, onPick, tabsRef }) {
+  const t = usePluginI18n(ID)
+
+  return h(
+    'nav',
+    { ref: tabsRef, 'aria-label': t('drawer.sections'), 'data-trello': 'drawer-tabs', style: st(ROW, { position: 'sticky', top: 0, zIndex: 2, gap: 0, justifyContent: 'space-between', padding: '0.375rem 0.25rem', margin: '0 -0.75rem', overflowX: 'auto', scrollbarWidth: 'none', flexShrink: 0, background: 'var(--ui-bg-elevated)', borderBottom: HAIRLINE }) },
+    ...DRAWER_SECTIONS.map(section => {
+      const on = active === section.id
+      const count = counts[section.id]
+
+      return h(
+        'button',
+        {
+          key: section.id,
+          'aria-current': on ? 'true' : undefined,
+          'data-active': on ? 'true' : 'false',
+          'data-section': section.id,
+          'data-trello': 'drawer-tab',
+          onClick: () => onPick(section.id),
+          type: 'button',
+          style: st({ whiteSpace: 'nowrap', cursor: 'pointer', font: 'inherit', fontSize: '0.65625rem', borderRadius: '999px', padding: '0.0625rem 0.25rem', flexShrink: 0, color: on ? 'var(--ui-text-primary)' : 'var(--ui-text-tertiary)', border: `1px solid ${on ? 'var(--ui-accent)' : 'transparent'}`, background: on ? mix('--ui-accent', 15) : 'transparent' })
+        },
+        t(section.label),
+        count !== undefined && h('b', { style: { marginLeft: '0.125rem', opacity: 0.75, fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, count)
+      )
+    })
+  )
+}
+
 function Drawer({ cardId, view, actions }) {
   const t = usePluginI18n(ID)
   const q = useCard(cardId)
   const [archiveOpen, setArchiveOpen] = useState(false)
+  const [pendingOnly, setPendingOnly] = useState(false)
+  const [activeTab, setActiveTab] = useState('description')
+  const scrollerRef = useRef(null)
+  const tabsRef = useRef(null)
   const detail = q.data
   const card = detail ? detail.card : view.cards.find(c => c.id === cardId)
   const close = () => RT.store.openCard.set(null)
@@ -2606,6 +2986,47 @@ function Drawer({ cardId, view, actions }) {
 
   const list = view.lists.find(l => l.id === card.id_list)
 
+  /** Top of every section relative to the top of the scroller (layout: only meaningful in a real browser). */
+  const sectionTops = () => {
+    const scroller = scrollerRef.current
+    const base = scroller.getBoundingClientRect().top
+
+    return DRAWER_SECTIONS.map(sec => {
+      const el = scroller.querySelector(`[data-trello="${sec.target}"]`)
+
+      return el ? { id: sec.id, top: el.getBoundingClientRect().top - base } : null
+    }).filter(Boolean)
+  }
+
+  const tabsHeight = () => (tabsRef.current ? tabsRef.current.getBoundingClientRect().height : 0)
+
+  const jumpTo = id => {
+    const scroller = scrollerRef.current
+    const entry = scroller && sectionTops().find(x => x.id === id)
+
+    setActiveTab(id)
+
+    if (entry && typeof scroller.scrollTo === 'function') {
+      // the drawer's own scroller, never scrollIntoView (that would also scroll the chat around the pane)
+      scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + entry.top - tabsHeight() - 6), behavior: 'smooth' })
+    }
+  }
+
+  const onScroll = () => {
+    const scroller = scrollerRef.current
+
+    if (!scroller) {
+      return
+    }
+
+    const atBottom = scroller.scrollHeight > scroller.clientHeight && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2
+    const next = activeSection(sectionTops(), tabsHeight() + 12, atBottom)
+
+    if (next) {
+      setActiveTab(prev => (prev === next ? prev : next))
+    }
+  }
+
   const archive = async () => {
     try {
       await actions.patch.mutateAsync({ cardId: card.id, fields: { closed: true } })
@@ -2629,7 +3050,8 @@ function Drawer({ cardId, view, actions }) {
       ),
       h(
         'div',
-        { style: st(FILL, { flex: 1, overflowY: 'auto', padding: '0.625rem 0.75rem', gap: '0.875rem' }) },
+        { ref: scrollerRef, 'data-trello': 'drawer-scroll', onScroll, style: st(FILL, { flex: 1, overflowY: 'auto', padding: detail ? '0 0.75rem 0.625rem' : '0.625rem 0.75rem', gap: '0.875rem' }) },
+        detail && h(DrawerTabs, { active: activeTab, counts: tabCounts(detail), onPick: jumpTo, tabsRef }),
         h(
           'div',
           { 'data-trello': 'drawer-controls', style: st(ROW, { flexWrap: 'wrap', gap: '0.375rem' }) },
@@ -2646,22 +3068,33 @@ function Drawer({ cardId, view, actions }) {
           : h(
               'div',
               { style: st(FILL, { gap: '0.875rem' }) },
-              h('section', { 'data-trello': 'description' }, h(SectionTitle, null, t('drawer.description')), detail.desc.trim() ? h(Markdown, { text: detail.desc }) : h('div', { style: st(MUTED, SMALL) }, t('drawer.noDescription'))),
-              h(ChecklistSection, { actions, cardId: card.id, detail }),
-              h(CommentsSection, { actions, cardId: card.id, detail }),
+              h('section', { 'data-trello': 'description' }, h(SectionTitle, null, t('drawer.description')), detail.desc.trim() ? h(Clamp, { lines: DESCRIPTION_CLAMP_LINES, name: 'description', text: detail.desc }, h(Markdown, { text: detail.desc })) : h('div', { style: st(MUTED, SMALL) }, t('drawer.noDescription'))),
+              h(ChecklistSection, { actions, cardId: card.id, detail, onPendingOnly: setPendingOnly, pendingOnly }),
+              h(CommentsSection, { actions, card, cardId: card.id, detail }),
               h(AttachmentsSection, { detail }),
               h(ActivitySection, { card, detail })
             )
       ),
       h(
         'footer',
-        { style: st(ROW, { flexWrap: 'wrap', gap: '0.375rem', padding: '0.5rem 0.75rem', borderTop: HAIRLINE, flexShrink: 0 }) },
+        { 'data-trello': 'drawer-footer', style: st(ROW, { flexWrap: 'wrap', gap: '0.375rem', padding: '0.375rem 0.75rem', borderTop: HAIRLINE, flexShrink: 0 }) },
         h(Tip, { label: t('card.sendHint') }, h(Button, { 'data-trello': 'drawer-send', onClick: e => handoffCard(card.id, { submit: Boolean(e.shiftKey) || RT.store.settings.get().sendMode === 'submit' }), size: 'sm', type: 'button' }, h(Codicon, { name: 'send' }), t('card.sendToAgent'))),
         // TODO(P3): ctx.llm via slash command. Today this only inserts a prepared prompt.
         h(Button, { 'data-trello': 'suggest', onClick: () => handoffCard(card.id, { suggest: true }), size: 'sm', type: 'button', variant: 'outline' }, h(Codicon, { name: 'sparkle' }), t('drawer.suggest')),
-        h(Button, { onClick: () => card.url && openLink(card.url), size: 'sm', type: 'button', variant: 'outline' }, h(Codicon, { name: 'link-external' }), t('common.openInTrello')),
-        h(IconButton, { icon: 'link', label: t('common.copyLink'), onClick: () => copyCardLink(card) }),
-        h(Button, { 'data-trello': 'archive', onClick: () => setArchiveOpen(true), size: 'sm', type: 'button', variant: 'ghost' }, h(Codicon, { name: 'archive' }), t('drawer.archive'))
+        // the secondary actions live in an overflow menu so the footer stays on one row
+        h(
+          DropdownMenu,
+          null,
+          h(DropdownMenuTrigger, { asChild: true }, h(Button, { 'aria-label': t('card.menu'), 'data-trello': 'drawer-more', size: 'icon-xs', type: 'button', variant: 'ghost' }, h(Codicon, { name: 'ellipsis' }))),
+          h(
+            DropdownMenuContent,
+            { align: 'end' },
+            h(DropdownMenuItem, { onSelect: () => card.url && openLink(card.url) }, h(Codicon, { name: 'link-external' }), t('common.openInTrello')),
+            h(DropdownMenuItem, { onSelect: () => copyCardLink(card) }, h(Codicon, { name: 'link' }), t('common.copyLink')),
+            h(DropdownMenuSeparator, null),
+            h(DropdownMenuItem, { 'data-trello': 'archive', onSelect: () => setArchiveOpen(true) }, h(Codicon, { name: 'archive' }), t('drawer.archive'))
+          )
+        )
       ),
       h(ConfirmDialog, { confirmLabel: t('drawer.archive'), description: t('drawer.archiveBody'), destructive: true, onClose: () => setArchiveOpen(false), onConfirm: archive, open: archiveOpen, title: t('drawer.archiveTitle') })
     )

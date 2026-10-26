@@ -230,6 +230,9 @@ export async function setupDom() {
   }
 
   const click = (el, init = {}) => fire(el, new w.MouseEvent('click', { bubbles: true, cancelable: true, ...init }))
+  // React derives onMouseEnter / onMouseLeave from mouseover / mouseout
+  const hover = el => fire(el, new w.MouseEvent('mouseover', { bubbles: true, cancelable: true }))
+  const unhover = el => fire(el, new w.MouseEvent('mouseout', { bubbles: true, cancelable: true }))
   const key = (el, k, init = {}) => fire(el, new w.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }))
 
   const type = async (el, value) => {
@@ -259,7 +262,7 @@ export async function setupDom() {
     await settle(4)
   }
 
-  return { dom, window: w, document: w.document, act, settle, mount, click, key, type, fire, resizeTo, intersect, React }
+  return { dom, window: w, document: w.document, act, settle, mount, click, hover, unhover, key, type, fire, resizeTo, intersect, React }
 }
 
 // -- synthetic backend ---------------------------------------------------------
@@ -756,7 +759,7 @@ const HEAVY_COMMENT_TAILS = [
 
 const HEAVY_COMMENTS = HEAVY_COMMENT_BASES.map((base, i) => (i % 4 === 3 ? base : `${base}${HEAVY_COMMENT_TAILS[i % 6]}${i % 4 === 2 ? HEAVY_COMMENT_TAILS[(i + 1) % 6] : ''}`))
 
-export function applyHeavyFixture(backend, { firstLane = 80, now = Date.now() } = {}) {
+export function applyHeavyFixture(backend, { firstLane = 80, now = Date.now(), laneCount = HEAVY_LANES.length } = {}) {
   const { state } = backend
   const iso = offsetMs => new Date(now + offsetMs).toISOString()
   const B1 = backend.ids.B1
@@ -889,9 +892,15 @@ export function applyHeavyFixture(backend, { firstLane = 80, now = Date.now() } 
   }))
 
   state.boards = [{ id: B1, name: 'Platform — release train', url: 'https://trello.com/b/hEaVy001', closed: false, starred: true }]
-  state.view = { board: state.boards[0], lists, cards, members, labels }
 
-  state.details = {
+  // a board with fewer lanes (they all fit the pane, so no lane strip): keep the first ones and what lives in them
+  const keptLists = lists.slice(0, laneCount)
+  const keptIds = new Set(keptLists.map(l => l.id))
+  const keptCards = cards.filter(c => keptIds.has(c.id_list))
+
+  state.view = { board: state.boards[0], lists: keptLists, cards: keptCards, members, labels }
+
+  state.details = !keptCards.includes(heavy) ? {} : {
     [heavy.id]: {
       card: heavy,
       desc: HEAVY_DESC,

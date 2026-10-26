@@ -388,7 +388,7 @@ export const DialogDescription = ({ children }) => e('p', null, children)
 export const DropdownMenu = ({ children }) => e('div', { 'data-menu': 'true' }, children)
 export const DropdownMenuTrigger = ({ children }) => children
 export const DropdownMenuContent = ({ children }) => e('div', { role: 'menu' }, children)
-export const DropdownMenuItem = ({ children, onSelect }) => e('button', { onClick: () => onSelect && onSelect(), role: 'menuitem', type: 'button' }, children)
+export const DropdownMenuItem = ({ children, onSelect, ...rest }) => e('button', { ...strip(rest, ['className', 'variant']), onClick: () => onSelect && onSelect(), role: 'menuitem', type: 'button' }, children)
 export const DropdownMenuSeparator = () => e('hr')
 
 const PopoverContext = React.createContext(null)
