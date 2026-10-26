@@ -62,8 +62,10 @@ function parseArgs(argv) {
 
     if (arg === '-h' || arg === '--help') {
       out.help = true
-    } else if (arg === '--allow-missing-font') {
+    } else    if (arg === '--allow-missing-font') {
       out.allowMissingFont = true
+    } else if (arg === '--require-font') {
+      out.requireFont = true
     } else if (takes.has(arg)) {
       if (i + 1 >= argv.length) {
         fail(2, `${arg} needs a value`)
@@ -88,9 +90,10 @@ if (args.help) {
 // -- scenes -------------------------------------------------------------------
 
 const SCENES = [
-  { name: 'pane-list', width: 480, height: 780 },
+  // heights are cropped to the content: a pane screenshot should end where the board ends
+  { name: 'pane-list', width: 480, height: 442 },
   // 4 lanes of 300 px + gaps + padding need 1254 px; at 1200 the last lane would be cut by the horizontal scroll
-  { name: 'pane-columns', width: 1280, height: 760 },
+  { name: 'pane-columns', width: 1280, height: 430 },
   // the drawer scrolls inside a 780 px pane; description + checklist + comments + activity need about 1075 px
   { name: 'card-drawer', width: 480, height: 1080 },
   { name: 'directive-chip', width: 560, height: 140 }
@@ -192,8 +195,10 @@ if (fontPath) {
   }
 
   fontCss = `@font-face{font-family:codicon;font-display:block;src:url(data:font/ttf;base64,${bytes.toString('base64')}) format("truetype")}`
-} else if (!args.allowMissingFont) {
-  fail(5, 'icon font not found. The pane draws its icons with the codicon font, which is not part of the stylesheet. Pass --codicon-font <codicon.ttf> (same @vscode/codicons version as the app) or set TRELLO_CODICON_FONT, or use --allow-missing-font to render without icons')
+} else if (args.requireFont) {
+  fail(5, 'icon font not found. The pane draws its icons with the codicon font, which is not part of the stylesheet. Pass --codicon-font <codicon.ttf> (same @vscode/codicons version as the app) or set TRELLO_CODICON_FONT')
+} else {
+  console.warn('warning: icon font not found — icons render as empty boxes. Pass --codicon-font <codicon.ttf> (same @vscode/codicons version as the app) for faithful screenshots.  [--require-font makes this fatal]')
 }
 
 // -- fixed clock (installed before anything reads the time) -------------------
