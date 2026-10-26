@@ -1496,7 +1496,7 @@ function DueChip({ card }) {
   const cssVar = DUE_VARS[info.kind]
   const title = info.kind === 'overdue' ? t('card.overdue') : info.kind === 'soon' ? t('card.dueSoon') : info.kind === 'done' ? t('card.dueDone') : ''
 
-  return h('span', { 'data-trello': `due-${info.kind}`, title, style: st(SMALL, { border: `1px solid var(${cssVar})`, color: `var(${cssVar})`, borderRadius: '4px', padding: '0 0.3125rem', textDecoration: info.kind === 'done' ? 'line-through' : 'none' }) }, formatDate(card.due))
+  return h('span', { 'data-trello': `due-${info.kind}`, title, style: st(SMALL, { border: `1px solid var(${cssVar})`, color: `var(${cssVar})`, borderRadius: '4px', padding: '0 0.3125rem', textDecoration: info.kind === 'done' ? 'line-through' : 'none', whiteSpace: 'nowrap', flexShrink: 0 }) }, formatDate(card.due))
 }
 
 function CardMeta({ card, view }) {
