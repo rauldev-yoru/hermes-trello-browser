@@ -1,0 +1,18 @@
+name: trello-browser
+version: 0.1.0
+description: Trello boards, lists and cards in a Hermes Desktop pane, with one-click
+  handoff of any card to the agent and tools to read and update it back.
+author: Raul
+license: MIT
+provides_tools:
+  - trello_boards
+  - trello_board_view
+  - trello_card
+  - trello_card_create
+  - trello_card_update
+  - trello_card_comment
+  - trello_checklist_add
+  - trello_checklist_item_add
+  - trello_checklist_item_set
+  - trello_search
+provides_hooks: []

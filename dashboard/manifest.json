@@ -1,0 +1,6 @@
+{
+  "name": "trello-browser",
+  "label": "Trello Browser",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

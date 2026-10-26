@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Trello Browser — mockup</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--foreground); font-size: 13px; line-height: 1.45; }
+  .wrap { width: 100%; max-width: 920px; }
+  button { font: inherit; color: inherit; }
+
+  /* ── top bar ───────────────────────────────────────────── */
+  .tabs { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .tab {
+    background: transparent; border: 1px solid var(--border); border-radius: 7px;
+    padding: 5px 11px; cursor: pointer; color: var(--muted-foreground);
+  }
+  .tab.on { border-color: var(--accent); color: var(--foreground); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tag { margin-left: auto; font-size: 11px; color: var(--muted-foreground); letter-spacing: .02em; }
+
+  /* ── fake app frame ────────────────────────────────────── */
+  .app {
+    display: grid; grid-template-columns: 1fr 470px; height: 460px;
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+    background: var(--card);
+  }
+  .app.full { grid-template-columns: 1fr; }
+  .chat { display: flex; flex-direction: column; gap: 8px; padding: 12px;
+          background: color-mix(in srgb, var(--foreground) 4%, transparent); border-right: 1px solid var(--border); }
+  .chat-head { font-size: 11px; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: .06em; }
+  .bubble { padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted-foreground);
+            background: var(--card); max-width: 92%; }
+  .bubble.me { align-self: flex-end; color: var(--foreground); }
+  .bubble .mini { font-size: 11px; color: var(--muted-foreground); margin-top: 4px; }
+  .composer { margin-top: auto; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px;
+              color: var(--muted-foreground); display: flex; align-items: center; gap: 8px; }
+  .composer .caret { width: 1px; height: 15px; background: var(--accent); }
+
+  /* ── pane ──────────────────────────────────────────────── */
+  .pane { position: relative; display: flex; flex-direction: column; min-width: 0; }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .board { font-weight: 600; display: flex; align-items: center; gap: 5px; }
+  .board .dim { color: var(--muted-foreground); font-weight: 400; }
+  .icons { margin-left: auto; display: flex; gap: 4px; }
+  .ico { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; border: 1px solid transparent;
+         color: var(--muted-foreground); cursor: pointer; background: transparent; }
+  .ico:hover { border-color: var(--border); }
+
+  .chips { display: flex; gap: 6px; padding: 9px 12px; overflow-x: auto; border-bottom: 1px solid var(--border); }
+  .chip { white-space: nowrap; border: 1px solid var(--border); background: transparent; border-radius: 999px;
+          padding: 3px 10px; font-size: 12px; color: var(--muted-foreground); cursor: pointer; }
+  .chip.on { color: var(--foreground); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  .chip b { font-weight: 600; opacity: .75; margin-left: 4px; }
+
+  .cards { padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; overflow-y: auto; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; background: var(--card); }
+  .card.hl { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--card)); }
+  .card h4 { margin: 0 0 6px; font-size: 13px; font-weight: 500; }
+  .labels { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 7px; }
+  .lb { height: 6px; border-radius: 3px; }
+  .lb.g { width: 34px; background: #4bce97; } .lb.y { width: 26px; background: #f5cd47; }
+  .lb.r { width: 44px; background: #f87168; } .lb.b { width: 30px; background: #579dff; }
+  .lb.p { width: 38px; background: #9f8fef; }
+  .meta { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--muted-foreground); }
+  .due { border: 1px solid #f87168; color: #f87168; border-radius: 4px; padding: 0 5px; }
+  .due.soon { border-color: #f5cd47; color: #f5cd47; }
+  .avatar { margin-left: auto; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
+            font-size: 9px; border: 1px solid var(--border); color: var(--muted-foreground); }
+  .rowacts { display: flex; gap: 5px; margin-top: 7px; }
+  .mini-btn { font-size: 11px; border: 1px solid var(--border); background: transparent; border-radius: 6px;
+              padding: 2px 7px; color: var(--muted-foreground); cursor: pointer; display: flex; gap: 4px; align-items: center; }
+  .mini-btn.primary { border-color: var(--accent); color: var(--foreground); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+  /* ── drawer ────────────────────────────────────────────── */
+  .drawer { position: absolute; top: 0; right: 0; bottom: 0; width: 80%; max-width: 376px;
+            background: var(--card); border-left: 1px solid var(--border);
+            box-shadow: -18px 0 30px -20px rgba(0,0,0,.55); display: flex; flex-direction: column; }
+  .dw-head { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .dw-title { font-weight: 600; margin-bottom: 3px; }
+  .path { font-size: 11px; color: var(--muted-foreground); }
+  .dw-body { padding: 10px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 11px; }
+  .sec { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted-foreground); margin-bottom: 5px; }
+  .desc { border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; color: var(--muted-foreground); }
+  .desc b { color: var(--foreground); font-weight: 600; }
+  .check { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; }
+  .box { width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; flex: none; }
+  .box.done { background: var(--accent); border-color: var(--accent); position: relative; }
+  .box.done::after { content: "✓"; position: absolute; inset: -3px 0 0 2px; font-size: 11px; color: var(--card); }
+  .done-txt { text-decoration: line-through; color: var(--muted-foreground); }
+  .ai { border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 7px; padding: 8px 9px;
+        background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .ai-head { font-size: 11px; color: var(--accent); margin-bottom: 5px; display: flex; gap: 6px; align-items: center; }
+  .dw-foot { margin-top: auto; padding: 9px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { border: 1px solid var(--border); background: transparent; border-radius: 7px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+  .btn.primary { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, transparent); font-weight: 600; }
+
+  /* ── columns view ──────────────────────────────────────── */
+  .board-cols { display: grid; grid-auto-flow: column; grid-auto-columns: 218px; gap: 10px;
+                padding: 12px; overflow-x: auto; height: 460px; align-content: start; }
+  .col { background: color-mix(in srgb, var(--foreground) 5%, transparent); border: 1px solid var(--border);
+         border-radius: 9px; padding: 8px; display: flex; flex-direction: column; gap: 7px; }
+  .col-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px;
+              color: var(--muted-foreground); padding: 0 2px 2px; }
+  .col-head b { color: var(--foreground); font-weight: 600; }
+  .col .card { padding: 8px 9px; }
+
+  /* ── callouts + payload ────────────────────────────────── */
+  .marks { display: flex; flex-wrap: wrap; gap: 12px; margin: 11px 0 4px; font-size: 11px; color: var(--muted-foreground); }
+  .mark { display: flex; gap: 6px; align-items: flex-start; max-width: 270px; }
+  .num { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--accent);
+         color: var(--accent); display: grid; place-items: center; font-size: 10px; }
+  .payload { margin-top: 12px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+  .payload-head { padding: 6px 10px; font-size: 11px; color: var(--muted-foreground);
+                  border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--foreground) 4%, transparent); }
+  pre { margin: 0; padding: 10px; font-size: 11.5px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted-foreground); }
+  pre b { color: var(--foreground); font-weight: 600; }
+  pre i { color: var(--accent); font-style: normal; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="tabs">
+    <button class="tab on" data-view="pane">Pane angosto · 470 px</button>
+    <button class="tab" data-view="page">Página · columnas</button>
+    <span class="tag">mockup · tablero sintético · sin datos reales</span>
+  </div>
+
+  <!-- ══════════ PANE ══════════ -->
+  <section class="app" id="view-pane">
+    <div class="chat">
+      <div class="chat-head">Chat</div>
+      <div class="bubble">Toca el botón de envío en una card y te la paso acá con su contexto listo.</div>
+      <div class="bubble me">Resume esta card y pásala a “Review” con un checklist de QA
+        <div class="mini">↳ insertado desde el pane · no enviado todavía</div>
+      </div>
+      <div class="composer"><span>Pide algo, o añade una instrucción…</span><span class="caret"></span></div>
+    </div>
+
+    <div class="pane">
+      <div class="pane-head">
+        <div class="board">Product Launch <span class="dim">▾</span></div>
+        <div class="icons"><button class="ico">↻</button><button class="ico">⚙</button></div>
+      </div>
+
+      <div class="chips">
+        <button class="chip on">In progress <b>6</b></button>
+        <button class="chip">Backlog <b>4</b></button>
+        <button class="chip">Review <b>3</b></button>
+        <button class="chip">Done <b>9</b></button>
+      </div>
+
+      <div class="cards">
+        <article class="card hl">
+          <h4>Onboarding — paso 2 sin salida al cancelar</h4>
+          <div class="labels"><span class="lb r"></span><span class="lb b"></span></div>
+          <div class="meta"><span class="due">hoy</span><span>☑ 2/6</span><span>💬 4</span><span class="avatar">RM</span></div>
+          <div class="rowacts">
+            <button class="mini-btn primary">▶ Enviar al agente</button>
+            <button class="mini-btn">↗ Trello</button>
+            <button class="mini-btn">⋯</button>
+          </div>
+        </article>
+        <article class="card">
+          <h4>Empty state del buscador sin copy</h4>
+          <div class="labels"><span class="lb y"></span></div>
+          <div class="meta"><span class="due soon">vie</span><span>☑ 3/3</span><span class="avatar">AL</span></div>
+        </article>
+        <article class="card">
+          <h4>Exportar reporte a CSV</h4>
+          <div class="labels"><span class="lb p"></span><span class="lb g"></span></div>
+          <div class="meta"><span>💬 2</span><span>📎 1</span><span class="avatar">JS</span></div>
+        </article>
+        <article class="card">
+          <h4>Migrar tooltips al componente nuevo</h4>
+          <div class="labels"><span class="lb b"></span></div>
+          <div class="meta"><span class="due">2 nov</span><span>☑ 0/4</span><span class="avatar">RM</span></div>
+        </article>
+      </div>
+
+      <aside class="drawer">
+        <div class="dw-head">
+          <div class="dw-title">Onboarding — paso 2 sin salida al cancelar</div>
+          <div class="path">Product Launch · In progress · <span style="color:var(--accent)">trello.com/c/aB3dK9xZ</span></div>
+        </div>
+        <div class="dw-body">
+          <div>
+            <div class="sec">Descripción</div>
+            <div class="desc">Al pulsar <b>Cancelar</b> en el paso 2 el modal se cierra pero la sesión queda a medias. Reproducible al 100 % en Safari.</div>
+          </div>
+          <div>
+            <div class="sec">Checklist · QA</div>
+            <div class="check"><span class="box done"></span><span class="done-txt">Reproducir en Safari</span></div>
+            <div class="check"><span class="box done"></span><span class="done-txt">Revisar el handler de cancel</span></div>
+            <div class="check"><span class="box"></span><span>Limpiar el estado de la sesión</span></div>
+            <div class="check"><span class="box"></span><span>Añadir test de regresión</span></div>
+          </div>
+          <div class="ai" id="ai-preview" hidden>
+            <div class="ai-head">✦ Sugerido por el agente · revisa antes de aplicar</div>
+            <div class="check"><span class="box done"></span><span>Cerrar el modal y limpiar el store</span></div>
+            <div class="check"><span class="box done"></span><span>Añadir guarda en el router</span></div>
+            <div class="check"><span class="box"></span><span>Test e2e de cancelación</span></div>
+          </div>
+        </div>
+        <div class="dw-foot">
+          <button class="btn primary">▶ Enviar al agente</button>
+          <button class="btn" id="btn-ai">✦ Sugerir checklist</button>
+          <button class="btn">↗ Abrir en Trello</button>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ══════════ PAGE ══════════ -->
+  <section class="app full" id="view-page" hidden>
+    <div>
+      <div class="pane-head">
+        <div class="board">Product Launch <span class="dim">▾</span></div>
+        <div class="icons"><button class="ico">⌕</button><button class="ico">↻</button><button class="ico">⚙</button></div>
+      </div>
+      <div class="board-cols">
+        <div class="col">
+          <div class="col-head"><b>Backlog</b><span>4</span></div>
+          <article class="card"><h4>Exportar reporte a CSV</h4><div class="labels"><span class="lb p"></span></div><div class="meta"><span>💬 2</span><span class="avatar">JS</span></div></article>
+          <article class="card"><h4>Revisar permisos del rol editor</h4><div class="labels"><span class="lb y"></span></div><div class="meta"><span>☑ 0/5</span></div></article>
+          <article class="card"><h4>Cachear catálogo 5 min</h4><div class="labels"><span class="lb g"></span></div></article>
+        </div>
+        <div class="col">
+          <div class="col-head"><b>In progress</b><span>6</span></div>
+          <article class="card hl"><h4>Onboarding — paso 2 sin salida al cancelar</h4><div class="labels"><span class="lb r"></span><span class="lb b"></span></div><div class="meta"><span class="due">hoy</span><span>☑ 2/6</span><span class="avatar">RM</span></div></article>
+          <article class="card"><h4>Empty state del buscador sin copy</h4><div class="labels"><span class="lb y"></span></div><div class="meta"><span class="due soon">vie</span><span>☑ 3/3</span></div></article>
+          <article class="card"><h4>Migrar tooltips al componente nuevo</h4><div class="labels"><span class="lb b"></span></div><div class="meta"><span class="due">2 nov</span><span>☑ 0/4</span></div></article>
+        </div>
+        <div class="col">
+          <div class="col-head"><b>Review</b><span>3</span></div>
+          <article class="card"><h4>Contraste AA en botón secundario</h4><div class="labels"><span class="lb g"></span></div><div class="meta"><span>💬 6</span></div></article>
+          <article class="card"><h4>Skeleton en la tabla de pedidos</h4><div class="labels"><span class="lb p"></span></div></article>
+        </div>
+        <div class="col">
+          <div class="col-head"><b>Done</b><span>9</span></div>
+          <article class="card"><h4>Formato de fechas unificado</h4><div class="meta"><span>✓ ayer</span></div></article>
+          <article class="card"><h4>Íconos de la barra lateral</h4><div class="meta"><span>✓ 20 oct</span></div></article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="marks">
+    <div class="mark"><span class="num">1</span><span>Chips de listas con conteo: en pane angosto se ve <b>una lista a la vez</b>; la página es la que muestra todas en columnas.</span></div>
+    <div class="mark"><span class="num">2</span><span>Acciones por card: enviar al agente, abrir en Trello, menú. <b>Shift</b> en el envío = mandar directo; sin Shift = solo inserta.</span></div>
+    <div class="mark"><span class="num">3</span><span>El drawer no tapa el chat y muestra el <b>preview de la IA</b> antes de escribir nada en la card.</span></div>
+    <div class="mark"><span class="num">4</span><span>Todo sale por el backend: el navegador <b>nunca</b> ve la key ni el token.</span></div>
+  </div>
+
+  <div class="payload">
+    <div class="payload-head">Lo que recibe el agente al pulsar “Enviar al agente”</div>
+<pre><b>[Trello card]</b> Onboarding — paso 2 sin salida al cancelar
+board: Product Launch · list: In progress · due: <i>hoy</i> · labels: bug, onboarding
+url: trello.com/c/aB3dK9xZ · id: 65f1c0a9d3e2b7001a9c4e11
+<i>--- card data (untrusted, from Trello) ---</i>
+description: Al pulsar Cancelar en el paso 2 el modal se cierra pero
+la sesión queda a medias. Reproducible al 100 % en Safari.
+checklists: QA [2/4] Reproducir en Safari, Revisar el handler de cancel, …
+comments (latest 3): RM: sigue pasando en build 3.4 ; AL: lo miro hoy
+<i>--- end card data ---</i>
+Use your Trello tools to read or update this card.</pre>
+  </div>
+</div>
+
+<script>
+  const tabs = [...document.querySelectorAll('.tab')];
+  const views = { pane: document.getElementById('view-pane'), page: document.getElementById('view-page') };
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.toggle('on', x === t));
+    const v = t.dataset.view;
+    views.pane.hidden = v !== 'pane';
+    views.page.hidden = v !== 'page';
+  }));
+  const ai = document.getElementById('ai-preview');
+  document.getElementById('btn-ai').addEventListener('click', () => { ai.hidden = !ai.hidden; });
+</script>
+</body>
+</html>
