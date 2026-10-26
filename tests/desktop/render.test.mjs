@@ -181,7 +181,7 @@ test('desktop pane render harness', { skip }, async t => {
 
     const post = backend.callsTo('POST', /^\/credentials$/)
     assert.equal(post.length, 1)
-    assert.deepEqual(post[0].body, { api_key: 'k'.repeat(32), token: 't'.repeat(64) })
+    assert.deepEqual(post[0].body, { api_key: 'k'.repeat(32), token: 't'.repeat(64), scope: 'app' }, 'All profiles is the default')
     assert.equal($(root, '[data-trello="connect"]'), null)
     assert.ok($$(root, '[data-trello="card"]').length > 0, 'workspace appears after connecting')
     assert.equal(text(root).includes('t'.repeat(64)), false, 'the token is never rendered back')
@@ -515,6 +515,7 @@ test('desktop pane render harness', { skip }, async t => {
     assert.ok(dialog)
     await env.click($(dialog, '[data-confirm]'))
     assert.equal(backend.callsTo('DELETE', /^\/credentials$/).length, 1)
+    assert.equal(backend.callsTo('DELETE', /^\/credentials$/)[0].query.scope, 'app', 'Disconnect acts on the chosen scope')
     assert.ok($(root, '[data-trello="connect"]'), 'back to the connect form')
     assert.equal(ctx.store.has('boardId'), false)
   })
@@ -604,6 +605,129 @@ test('desktop pane render harness', { skip }, async t => {
     await openCard(root, 'Onboarding')
     await env.click(byText($(root, '[data-trello="drawer"]'), 'button', 'Open in Trello'))
     assert.deepEqual(ctx.opened, ['https://trello.com/c/Card0001'])
+  })
+
+  // -- credential scope ------------------------------------------------------
+  const openSettings = async root => {
+    await env.click($(root, '[data-trello="settings-button"]'))
+
+    return $(root, '[data-trello="settings"]')
+  }
+
+  const radio = (panel, label) => byText($(panel, '[data-trello="cred-scope"]'), '[role="radio"]', label)
+
+  await scenario('credentials scope: selector defaults to All profiles, persists, and moves nothing', {}, async ({ root, ctx, backend }) => {
+    const panel = await openSettings(root)
+    const group = $(panel, '[data-trello="cred-scope"]')
+    assert.ok(group, 'the selector lives in Settings')
+    assert.deepEqual($$(group, '[role="radio"]').map(text), ['All profiles', 'This profile'])
+    assert.equal(radio(panel, 'All profiles').getAttribute('aria-checked'), 'true')
+    assert.equal(radio(panel, 'This profile').getAttribute('aria-checked'), 'false')
+    assert.equal($(root, '[data-trello="connect"]'), null, 'the connection form has no selector')
+
+    const writes = () => backend.calls.filter(c => c.method !== 'GET').length
+    await env.click(radio(panel, 'This profile'))
+    assert.equal(radio(panel, 'This profile').getAttribute('aria-checked'), 'true')
+    assert.equal(ctx.store.get('settings').credentialScope, 'profile', 'saved in ctx.storage')
+    assert.equal(writes(), 0, 'switching the scope never writes or moves credentials')
+
+    await env.click(radio(panel, 'All profiles'))
+    assert.equal(ctx.store.get('settings').credentialScope, 'app')
+  })
+
+  await scenario('credentials scope: the saved choice is restored', { settings: { credentialScope: 'profile' } }, async ({ root }) => {
+    const panel = await openSettings(root)
+    assert.equal(radio(panel, 'This profile').getAttribute('aria-checked'), 'true')
+  })
+
+  for (const [name, setup, expected] of [
+    ['all profiles', b => { b.state.scopes = { app: true, profile: false } }, 'Using credentials for all profiles'],
+    ['this profile', b => { b.state.scopes = { app: true, profile: true } }, 'Using credentials for this profile'],
+    ['environment', b => { b.state.env = true }, 'Using environment credentials']
+  ]) {
+    await scenario(`credentials scope: the status line says "${expected}" (${name})`, { setup }, async ({ root }) => {
+      const panel = await openSettings(root)
+      assert.equal(text($(panel, '[data-trello="cred-state"]')), expected)
+    })
+  }
+
+  await scenario('credentials scope: environment credentials disable the selector (and explain why)', { setup: b => { b.state.env = true } }, async ({ root, ctx }) => {
+    const panel = await openSettings(root)
+    const radios = $$($(panel, '[data-trello="cred-scope"]'), '[role="radio"]')
+    assert.equal(radios.length, 2)
+    assert.ok(radios.every(r => r.disabled), 'both options are disabled')
+    assert.equal($(panel, '[data-trello="cred-scope"] [role="radiogroup"]').getAttribute('aria-disabled'), 'true')
+    assert.equal($(panel, '[data-trello="disconnect"]').disabled, true, 'nothing to disconnect while the environment decides')
+    await env.click(radios[1])
+    assert.notEqual((ctx.store.get('settings') || {}).credentialScope, 'profile', 'a disabled option changes nothing')
+    assert.ok(text($(panel, '[data-trello="credentials"]')).includes('Using environment credentials'))
+  })
+
+  await scenario('credentials scope: a hint when the other scope already holds credentials', { settings: { credentialScope: 'profile' } }, async ({ root }) => {
+    const panel = await openSettings(root)
+    assert.equal(text($(panel, '[data-trello="cred-reconnect"]')), 'Reconnect to store credentials for this profile')
+    assert.equal(text($(panel, '[data-trello="cred-state"]')), 'Using credentials for all profiles', 'the account in use is not moved')
+    await env.click(radio(panel, 'All profiles'))
+    assert.equal($(panel, '[data-trello="cred-reconnect"]'), null, 'the chosen scope holds credentials: no hint')
+  })
+
+  await scenario('credentials scope: the hint names All profiles when only this profile is stored', { settings: { credentialScope: 'app' }, setup: b => { b.state.scopes = { app: false, profile: true } } }, async ({ root }) => {
+    const panel = await openSettings(root)
+    assert.equal(text($(panel, '[data-trello="cred-reconnect"]')), 'Reconnect to store credentials for all profiles')
+  })
+
+  await scenario('credentials scope: "This profile" without a separate profile home says where it goes', { settings: { credentialScope: 'profile' }, setup: b => { b.state.profileIsRoot = true } }, async ({ root }) => {
+    const panel = await openSettings(root)
+    assert.equal($(panel, '[data-trello="cred-reconnect"]'), null)
+    assert.ok(text($(panel, '[data-trello="cred-root-note"]')).includes('credentials are stored for all profiles'))
+  })
+
+  await scenario('credentials scope: Connect posts the chosen scope', { backend: makeBackend({ connected: false }), settings: { credentialScope: 'profile' } }, async ({ root, backend }) => {
+    const form = $(root, '[data-trello="connect"]')
+    await env.type($(form, '[data-trello="api-key"]'), 'k'.repeat(32))
+    await env.type($(form, '[data-trello="token"]'), 't'.repeat(64))
+    await env.click($(root, '[data-trello="connect-submit"]'))
+    const post = backend.callsTo('POST', /^\/credentials$/)
+    assert.equal(post.length, 1)
+    assert.equal(post[0].body.scope, 'profile')
+    assert.equal(backend.state.scopes.profile, true)
+    assert.ok($$(root, '[data-trello="card"]').length > 0)
+  })
+
+  await scenario('credentials scope: Disconnect acts on the chosen scope and keeps the other account', { settings: { credentialScope: 'profile' }, setup: b => { b.state.scopes = { app: true, profile: true } } }, async ({ root, backend }) => {
+    const panel = await openSettings(root)
+    await env.click($(panel, '[data-trello="disconnect"]'))
+    const dialog = $(root, '[role="dialog"][aria-label="Disconnect Trello?"]')
+    assert.ok(text(dialog).includes('for this profile'), text(dialog))
+    await env.click($(dialog, '[data-confirm]'))
+    const del = backend.callsTo('DELETE', /^\/credentials$/)
+    assert.equal(del.length, 1)
+    assert.equal(del[0].query.scope, 'profile')
+    assert.deepEqual(backend.state.scopes, { app: true, profile: false })
+    assert.equal($(root, '[data-trello="connect"]'), null, 'still connected through the app-wide account')
+    assert.ok($$(root, '[data-trello="card"]').length > 0)
+  })
+
+  await scenario('credentials scope: Disconnect of the only account returns to the connect form', { settings: { credentialScope: 'app' } }, async ({ root, backend }) => {
+    const panel = await openSettings(root)
+    assert.ok(text($(panel, '[data-trello="credentials"]')).includes('Using credentials for all profiles'))
+    await env.click($(panel, '[data-trello="disconnect"]'))
+    const dialog = $(root, '[role="dialog"][aria-label="Disconnect Trello?"]')
+    assert.ok(text(dialog).includes('for all profiles'))
+    await env.click($(dialog, '[data-confirm]'))
+    assert.equal(backend.callsTo('DELETE', /^\/credentials$/)[0].query.scope, 'app')
+    assert.ok($(root, '[data-trello="connect"]'))
+  })
+
+  await scenario('credentials scope: the status line follows a reconnect in the other scope', { settings: { credentialScope: 'profile' } }, async ({ root, backend }) => {
+    const panel = await openSettings(root)
+    assert.ok($(panel, '[data-trello="cred-reconnect"]'))
+    backend.state.scopes.profile = true
+    await env.click($(root, '[data-trello="settings-button"]'))
+    await env.click($(root, '[data-trello="settings-button"]'))
+    const again = $(root, '[data-trello="settings"]')
+    assert.equal(text($(again, '[data-trello="cred-state"]')), 'Using credentials for this profile')
+    assert.equal($(again, '[data-trello="cred-reconnect"]'), null)
   })
 
   // -- transcript directive ---------------------------------------------------

@@ -198,7 +198,7 @@ export function useQuery(options) {
   }, [entry.hash])
 
   React.useEffect(() => {
-    if (enabled && !entry.promise && (entry.data === undefined || entry.invalidated)) {
+    if (enabled && !entry.promise && (entry.data === undefined || entry.invalidated || options.refetchOnMount === 'always')) {
       queryClient.runFetch(entry, options.queryFn)
     }
   }, [entry.hash, enabled])
@@ -268,7 +268,7 @@ export const Skeleton = props => e('div', { 'data-skeleton': 'true', ...props })
 export const EmptyState = ({ title, description }) => e('div', { 'data-empty': 'true', role: 'note' }, e('div', null, title), description ? e('div', null, description) : null)
 export const ErrorState = ({ title, description, children }) => e('div', { 'data-error': 'true', role: 'alert' }, e('div', null, title), description ? e('p', null, description) : null, children)
 export const Separator = () => e('hr')
-export const SegmentedControl = ({ options, value, onChange }) => e('div', { role: 'radiogroup' }, ...options.map(o => e('button', { 'aria-checked': o.id === value, key: o.id, onClick: () => onChange(o.id), role: 'radio', type: 'button' }, o.label)))
+export const SegmentedControl = ({ options, value, onChange, disabled = false }) => e('div', { 'aria-disabled': disabled ? 'true' : undefined, role: 'radiogroup' }, ...options.map(o => e('button', { 'aria-checked': o.id === value, disabled, key: o.id, onClick: () => onChange(o.id), role: 'radio', type: 'button' }, o.label)))
 export const CopyButton = ({ text, label }) => e('button', { 'data-copy': text, type: 'button' }, label || 'copy')
 
 export function ConfirmDialog({ open, onClose, onConfirm, title, description, children, confirmLabel = 'Confirm', cancelLabel = 'Cancel' }) {

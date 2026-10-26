@@ -69,7 +69,7 @@ const SOON_MS = 2 * DAY_MS
 const REFRESH_CHOICES = [0, 15, 25, 60]
 const TRELLO_ADMIN_URL = 'https://trello.com/apps/admin'
 
-export const DEFAULT_SETTINGS = Object.freeze({ sendMode: 'insert', refreshSec: 25, defaultBoard: null })
+export const DEFAULT_SETTINGS = Object.freeze({ sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'app' })
 
 const EN = {
   pane: { title: 'Trello' },
@@ -199,8 +199,20 @@ const EN = {
     defaultBoardLast: 'Last used',
     disconnect: 'Disconnect',
     disconnectTitle: 'Disconnect Trello?',
-    disconnectBody: 'The stored API key and token will be deleted from this machine.',
+    disconnectBodyApp: 'The stored API key and token for all profiles will be deleted from this machine.',
+    disconnectBodyProfile: 'The stored API key and token for this profile will be deleted from this machine.',
     disconnected: 'Trello disconnected.',
+    credentials: 'Credentials',
+    scopeApp: 'All profiles',
+    scopeProfile: 'This profile',
+    scopeHint: 'Applies to the next Connect and Disconnect. Saved credentials are not moved.',
+    scopeLocked: 'Environment variables (TRELLO_API_KEY and TRELLO_TOKEN) take priority, so this choice has no effect while they are set.',
+    usingApp: 'Using credentials for all profiles',
+    usingProfile: 'Using credentials for this profile',
+    usingEnv: 'Using environment credentials',
+    usingNone: 'No credentials stored',
+    reconnectFor: scope => `Reconnect to store credentials for ${scope === 'profile' ? 'this profile' : 'all profiles'}`,
+    profileIsRoot: 'This profile has no home of its own here, so credentials are stored for all profiles.',
     connectedAs: name => `Signed in as ${name}`
   }
 }
@@ -333,8 +345,20 @@ const ES = {
     defaultBoardLast: 'El último usado',
     disconnect: 'Desconectar',
     disconnectTitle: '¿Desconectar Trello?',
-    disconnectBody: 'La API key y el token guardados se borrarán de esta máquina.',
+    disconnectBodyApp: 'La API key y el token guardados para todos los perfiles se borrarán de esta máquina.',
+    disconnectBodyProfile: 'La API key y el token guardados para este perfil se borrarán de esta máquina.',
     disconnected: 'Trello desconectado.',
+    credentials: 'Credenciales',
+    scopeApp: 'Todos los perfiles',
+    scopeProfile: 'Este perfil',
+    scopeHint: 'Se aplica al próximo Conectar y Desconectar. Las credenciales guardadas no se mueven.',
+    scopeLocked: 'Las variables de entorno (TRELLO_API_KEY y TRELLO_TOKEN) tienen prioridad, así que esta opción no tiene efecto mientras estén definidas.',
+    usingApp: 'Usando las credenciales de todos los perfiles',
+    usingProfile: 'Usando las credenciales de este perfil',
+    usingEnv: 'Usando las credenciales del entorno',
+    usingNone: 'No hay credenciales guardadas',
+    reconnectFor: scope => `Vuelve a conectar para guardar las credenciales de ${scope === 'profile' ? 'este perfil' : 'todos los perfiles'}`,
+    profileIsRoot: 'Este perfil no tiene un directorio propio aquí, así que las credenciales se guardan para todos los perfiles.',
     connectedAs: name => `Sesión como ${name}`
   }
 }
@@ -564,7 +588,32 @@ export function normalizeSettings(raw) {
   return {
     sendMode: r.sendMode === 'submit' ? 'submit' : 'insert',
     refreshSec: REFRESH_CHOICES.includes(refresh) ? refresh : DEFAULT_SETTINGS.refreshSec,
-    defaultBoard: typeof r.defaultBoard === 'string' && r.defaultBoard ? r.defaultBoard : null
+    defaultBoard: typeof r.defaultBoard === 'string' && r.defaultBoard ? r.defaultBoard : null,
+    // Where the next Connect / Disconnect acts: one account for the whole app, or for this profile only.
+    credentialScope: r.credentialScope === 'profile' ? 'profile' : 'app'
+  }
+}
+
+/**
+ * What Settings shows about the stored credentials (`GET /credentials`) for the chosen scope.
+ * `state` is the source in use; `locked` when environment variables decide (the scope then has no effect);
+ * `reconnectFor` is the chosen scope when it holds nothing yet but the other one does.
+ */
+export function credentialsView(status, chosen = 'app') {
+  if (!status || typeof status !== 'object') {
+    return { state: 'unknown', locked: false, reconnectFor: null, profileIsRoot: false }
+  }
+
+  const state = status.source === 'env' || status.source === 'profile' || status.source === 'app' ? status.source : 'none'
+  const profileIsRoot = Boolean(status.profile_is_root)
+  const has = { app: Boolean(status.app_file), profile: Boolean(status.profile_file) }
+  const other = chosen === 'profile' ? 'app' : 'profile'
+
+  return {
+    state,
+    locked: state === 'env',
+    reconnectFor: state !== 'env' && !profileIsRoot && !has[chosen] && has[other] ? chosen : null,
+    profileIsRoot
   }
 }
 
@@ -1085,6 +1134,7 @@ export const K = {
   all: ['trello'],
   health: ['trello', 'health'],
   boards: ['trello', 'boards'],
+  credentials: ['trello', 'credentials'],
   view: id => ['trello', 'view', id],
   card: id => ['trello', 'card', id]
 }
@@ -1761,10 +1811,48 @@ function BoardPicker({ boards, boardId }) {
   )
 }
 
+function CredentialsSettings({ view }) {
+  const t = usePluginI18n(ID)
+  const settings = useValue(RT.store.settings)
+
+  const stateLine = {
+    app: t('settings.usingApp'),
+    profile: t('settings.usingProfile'),
+    env: t('settings.usingEnv'),
+    none: t('settings.usingNone')
+  }[view.state]
+
+  const control = h(
+    'div',
+    { 'data-trello': 'cred-scope', style: { display: 'inline-flex' } },
+    h(SegmentedControl, {
+      className: view.locked ? 'pointer-events-none' : undefined,
+      disabled: view.locked,
+      onChange: id => setSettings({ credentialScope: id }),
+      options: [{ id: 'app', label: t('settings.scopeApp') }, { id: 'profile', label: t('settings.scopeProfile') }],
+      value: settings.credentialScope
+    })
+  )
+
+  return h(
+    'div',
+    { 'data-trello': 'credentials', style: st(FILL, { gap: '0.25rem' }) },
+    h('span', { style: SMALL }, t('settings.credentials')),
+    h(Tip, { label: view.locked ? t('settings.scopeLocked') : undefined }, control),
+    stateLine && h('span', { 'data-trello': 'cred-state', 'data-trello-source': view.state, style: st(MUTED, SMALL) }, stateLine),
+    view.reconnectFor && h('span', { 'data-trello': 'cred-reconnect', style: st(SMALL, { color: 'var(--ui-yellow)' }) }, t('settings.reconnectFor', view.reconnectFor)),
+    settings.credentialScope === 'profile' && view.profileIsRoot && h('span', { 'data-trello': 'cred-root-note', style: st(MUTED, SMALL) }, t('settings.profileIsRoot')),
+    h('span', { style: st(MUTED, SMALL) }, t('settings.scopeHint'))
+  )
+}
+
 function SettingsPanel({ boards, member, onDisconnect }) {
   const t = usePluginI18n(ID)
   const settings = useValue(RT.store.settings)
   const board = boards.find(b => b.id === settings.defaultBoard)
+  // Re-read every time Settings opens: another window or profile may have changed what is stored.
+  const credentialsQ = useQuery({ queryKey: K.credentials, queryFn: () => rest('/credentials'), refetchOnMount: 'always' })
+  const credentials = credentialsView(credentialsQ.data, settings.credentialScope)
 
   return h(
     'div',
@@ -1785,19 +1873,23 @@ function SettingsPanel({ boards, member, onDisconnect }) {
       )
     ),
     h(Separator, null),
-    h(Button, { 'data-trello': 'disconnect', onClick: onDisconnect, size: 'sm', type: 'button', variant: 'destructive' }, t('settings.disconnect'))
+    h(CredentialsSettings, { view: credentials }),
+    h(Button, { 'data-trello': 'disconnect', disabled: credentials.locked, onClick: onDisconnect, size: 'sm', type: 'button', variant: 'destructive' }, t('settings.disconnect'))
   )
 }
 
-function Header({ boards, boardId, member, fetching, onRefresh }) {
+/** Confirm + perform Disconnect for the scope chosen in Settings (read at click time). */
+function DisconnectDialog({ open, onClose }) {
   const t = usePluginI18n(ID)
   const qc = useQueryClient()
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [confirm, setConfirm] = useState(false)
+  const scope = useValue(RT.store.settings).credentialScope
 
   const disconnect = async () => {
+    const chosen = RT.store.settings.get().credentialScope
+    const before = qc.getQueryData(K.credentials)
+
     try {
-      await rest('/credentials', { method: 'DELETE' })
+      await rest(`/credentials?scope=${chosen}`, { method: 'DELETE' })
     } catch (err) {
       // A 204 has no body; only a real HTTP failure aborts the disconnect.
       if (parseApiError(err).status >= 400) {
@@ -1805,13 +1897,28 @@ function Header({ boards, boardId, member, fetching, onRefresh }) {
       }
     }
 
+    // The other scope may still hold an account: this profile is then connected through it.
+    const remains = Boolean(before) && (chosen === 'profile' ? Boolean(before.app_file) && !before.profile_is_root : Boolean(before.profile_file))
+
     RT.ctx.storage.remove('boardId')
     RT.store.boardId.set(null)
     RT.store.openCard.set(null)
-    qc.setQueryData(K.health, { connected: false, member: null, source: null })
-    qc.invalidateQueries({ queryKey: K.health })
+
+    if (!remains) {
+      qc.setQueryData(K.health, { connected: false, member: null, source: null })
+    }
+
+    qc.invalidateQueries({ queryKey: K.all })
     toast('info', t('settings.disconnected'))
   }
+
+  return h(ConfirmDialog, { confirmLabel: t('settings.disconnect'), description: t(scope === 'profile' ? 'settings.disconnectBodyProfile' : 'settings.disconnectBodyApp'), destructive: true, onClose, onConfirm: disconnect, open, title: t('settings.disconnectTitle') })
+}
+
+function Header({ boards, boardId, member, fetching, onRefresh }) {
+  const t = usePluginI18n(ID)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [confirm, setConfirm] = useState(false)
 
   return h(
     'header',
@@ -1825,7 +1932,7 @@ function Header({ boards, boardId, member, fetching, onRefresh }) {
       h(PopoverTrigger, { asChild: true }, h(Button, { 'aria-label': t('common.settings'), 'data-trello': 'settings-button', size: 'icon-xs', type: 'button', variant: 'ghost' }, h(Codicon, { name: 'gear' }))),
       h(PopoverContent, { align: 'end', style: { width: '18rem' } }, h(SettingsPanel, { boards, member, onDisconnect: () => { setSettingsOpen(false); setConfirm(true) } }))
     ),
-    h(ConfirmDialog, { confirmLabel: t('settings.disconnect'), description: t('settings.disconnectBody'), destructive: true, onClose: () => setConfirm(false), onConfirm: disconnect, open: confirm, title: t('settings.disconnectTitle') })
+    h(DisconnectDialog, { onClose: () => setConfirm(false), open: confirm })
   )
 }
 
@@ -2144,7 +2251,7 @@ function ConnectView({ rejected }) {
 
   const submit = () => {
     if (ready && !connect.isPending) {
-      connect.mutate({ api_key: apiKey.trim(), token: token.trim() })
+      connect.mutate({ api_key: apiKey.trim(), token: token.trim(), scope: RT.store.settings.get().credentialScope })
     }
   }
 

@@ -222,7 +222,21 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
         { id: oid(33), name: 'onboarding', color: 'blue' }
       ]
     },
-    details: {}
+    details: {},
+    // credential storage as the backend reports it: files per scope, and whether environment variables decide
+    scopes: { app: connected, profile: false },
+    env: false,
+    profileIsRoot: false
+  }
+
+  const credentialStatus = () => {
+    const source = state.env ? 'env' : state.scopes.profile && !state.profileIsRoot ? 'profile' : state.scopes.app ? 'app' : null
+
+    return {
+      configured: source !== null, source, active_scope: source, env_partial: false,
+      app_file: state.scopes.app, profile_file: state.scopes.profile && !state.profileIsRoot,
+      profile_overrides: source === 'profile', profile_is_root: state.profileIsRoot, profile_home: 'profile-home'
+    }
   }
 
   state.details[oid(101)] = {
@@ -311,7 +325,7 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
   backend.rest = async (rawPath, opts = {}) => {
     const method = (opts.method || 'GET').toUpperCase()
     const pathname = rawPath.split('?')[0]
-    backend.calls.push({ method, path: pathname, body: opts.body })
+    backend.calls.push({ method, path: pathname, body: opts.body, query: Object.fromEntries(new URLSearchParams(rawPath.split('?')[1] || '')) })
 
     for (const gate of backend.gates) {
       if (gate.match(method, pathname)) {
@@ -330,21 +344,36 @@ export function makeBackend({ connected = true, rejected = false } = {}) {
 
     if (method === 'GET' && pathname === '/health') {
       if (!state.connected) {
-        return { connected: false, member: null, source: null, ...(state.rejected ? { error: 'credentials_rejected' } : {}) }
+        return { connected: false, member: null, source: null, scope: null, ...(state.rejected ? { error: 'credentials_rejected' } : {}) }
       }
 
-      return { connected: true, member: { id: M1, username: 'ada', full_name: 'Ada Demo' }, source: 'file' }
+      const { source } = credentialStatus()
+
+      return { connected: true, member: { id: M1, username: 'ada', full_name: 'Ada Demo' }, source, scope: source }
+    }
+
+    if (method === 'GET' && pathname === '/credentials') {
+      return credentialStatus()
     }
 
     if (method === 'POST' && pathname === '/credentials') {
+      const requested = body.scope || 'app'
+      const stored = requested === 'profile' && state.profileIsRoot ? 'app' : requested
+      state.scopes[stored] = true
       state.connected = true
       state.rejected = false
 
-      return { connected: true, member: { id: M1, username: 'ada', full_name: 'Ada Demo' }, source: 'file', shadowed_by_env: false }
+      return { connected: true, member: { id: M1, username: 'ada', full_name: 'Ada Demo' }, source: credentialStatus().source, scope: stored, scope_requested: requested, shadowed_by_env: state.env }
     }
 
     if (method === 'DELETE' && pathname === '/credentials') {
-      state.connected = false
+      const scope = new URLSearchParams(rawPath.split('?')[1] || '').get('scope') || credentialStatus().active_scope
+
+      if (scope === 'app' || scope === 'profile') {
+        state.scopes[scope === 'profile' && state.profileIsRoot ? 'app' : scope] = false
+      }
+
+      state.connected = state.env || state.scopes.app || state.scopes.profile
 
       return undefined
     }

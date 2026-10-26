@@ -273,9 +273,9 @@ test('desktop helpers', { skip }, async t => {
   })
 
   await t.test('settings, boards and layout helpers', () => {
-    assert.deepEqual(P.normalizeSettings(undefined), { sendMode: 'insert', refreshSec: 25, defaultBoard: null })
-    assert.deepEqual(P.normalizeSettings({ sendMode: 'submit', refreshSec: 60, defaultBoard: 'b' }), { sendMode: 'submit', refreshSec: 60, defaultBoard: 'b' })
-    assert.deepEqual(P.normalizeSettings({ sendMode: 'x', refreshSec: 7, defaultBoard: 5 }), { sendMode: 'insert', refreshSec: 25, defaultBoard: null })
+    assert.deepEqual(P.normalizeSettings(undefined), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'app' })
+    assert.deepEqual(P.normalizeSettings({ sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'profile' }), { sendMode: 'submit', refreshSec: 60, defaultBoard: 'b', credentialScope: 'profile' })
+    assert.deepEqual(P.normalizeSettings({ sendMode: 'x', refreshSec: 7, defaultBoard: 5, credentialScope: 'everyone' }), { sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'app' })
     assert.equal(P.normalizeSettings({ refreshSec: 0 }).refreshSec, 0)
 
     const boards = [
@@ -352,6 +352,31 @@ test('desktop helpers', { skip }, async t => {
     assert.deepEqual(P.toggleLabelIds(choices, 'c').sort(), ['b', 'c', 'd'])
     assert.deepEqual(P.labelChoices(board, undefined).map(c => c.checked), [false, false, false, false], 'a card without label_ids has none checked')
     assert.deepEqual(P.labelChoices(undefined, ['a']), [])
+  })
+
+  await t.test('credentialsView: source, lock and the reconnect hint', () => {
+    const status = (over = {}) => ({ configured: true, source: 'app', active_scope: 'app', env_partial: false, app_file: true, profile_file: false, profile_overrides: false, profile_is_root: false, profile_home: 'home', ...over })
+
+    assert.equal(P.credentialsView(undefined).state, 'unknown')
+    assert.equal(P.credentialsView(null, 'profile').reconnectFor, null)
+    assert.deepEqual(P.credentialsView(status(), 'app'), { state: 'app', locked: false, reconnectFor: null, profileIsRoot: false })
+    assert.deepEqual(P.credentialsView(status({ source: 'profile', profile_file: true, profile_overrides: true }), 'profile'), { state: 'profile', locked: false, reconnectFor: null, profileIsRoot: false })
+    assert.equal(P.credentialsView(status({ source: null, configured: false, app_file: false }), 'app').state, 'none')
+    assert.equal(P.credentialsView(status({ source: 'weird' }), 'app').state, 'none', 'an unknown source is never shown as a scope')
+
+    // environment decides: locked, and no reconnect hint whatever the files say
+    const env = P.credentialsView(status({ source: 'env', app_file: true }), 'profile')
+    assert.deepEqual([env.state, env.locked, env.reconnectFor], ['env', true, null])
+
+    // chosen scope empty, the other one stored -> hint names the chosen scope
+    assert.equal(P.credentialsView(status(), 'profile').reconnectFor, 'profile')
+    assert.equal(P.credentialsView(status({ source: 'profile', app_file: false, profile_file: true }), 'app').reconnectFor, 'app')
+    // both stored, or only the chosen one: no hint
+    assert.equal(P.credentialsView(status({ profile_file: true }), 'profile').reconnectFor, null)
+    assert.equal(P.credentialsView(status({ app_file: false, profile_file: true, source: 'profile' }), 'profile').reconnectFor, null)
+    // "this profile" is the app home here: nothing to reconnect, the note explains instead
+    const root = P.credentialsView(status({ profile_is_root: true }), 'profile')
+    assert.deepEqual([root.reconnectFor, root.profileIsRoot], [null, true])
   })
 
   await t.test('due urgency and date input round trip', () => {
@@ -540,7 +565,7 @@ test('plugin.js source rules', async t => {
   })
 
   await t.test('only Tailwind literals verified against the app source are used', () => {
-    const allowed = new Set(['truncate', 'min-h-0'])
+    const allowed = new Set(['truncate', 'min-h-0', 'pointer-events-none'])
     const used = [...code.matchAll(/className:\s*'([^']*)'/g)].flatMap(m => m[1].split(/\s+/))
 
     for (const cls of used) {
