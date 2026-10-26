@@ -22,10 +22,15 @@ import {
   Codicon,
   ConfirmDialog,
   CopyButton,
+  Dialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
   DropdownMenuTrigger,
   EmptyState,
   ErrorState,
@@ -69,7 +74,7 @@ const SOON_MS = 2 * DAY_MS
 const REFRESH_CHOICES = [0, 15, 25, 60]
 const TRELLO_ADMIN_URL = 'https://trello.com/apps/admin'
 
-export const DEFAULT_SETTINGS = Object.freeze({ sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'app' })
+export const DEFAULT_SETTINGS = Object.freeze({ sendMode: 'insert', refreshSec: 25, defaultBoard: null, credentialScope: 'profile' })
 
 const EN = {
   pane: { title: 'Trello' },
@@ -206,7 +211,22 @@ const EN = {
     scopeApp: 'All profiles',
     scopeProfile: 'This profile',
     scopeHint: 'Applies to the next Connect and Disconnect. Saved credentials are not moved.',
-    scopeLocked: 'Environment variables (TRELLO_API_KEY and TRELLO_TOKEN) take priority, so this choice has no effect while they are set.',
+    scopeLocked: 'TRELLO_API_KEY and TRELLO_TOKEN take priority over anything saved here. Remove them to configure the connection from this pane.',
+    scopeWarnTitle: 'Use one account for every profile?',
+    scopeWarn1: 'Credentials saved from now on are stored once for the whole app.',
+    scopeWarn2: 'Every profile without its own connection will use this account.',
+    scopeWarn3: 'Profiles that already have their own credentials keep them — disconnect them explicitly to fall back to this one.',
+    scopeWarnConfirm: 'Use for all profiles',
+    changeAccount: 'Change account',
+    changeIntroApp: 'The new account is stored for all profiles.',
+    changeIntroProfile: 'The new account is stored for this profile only.',
+    connectScope: scope => (scope === 'profile' ? 'Connect this profile' : 'Connect for all profiles'),
+    overridesApp: 'This profile overrides the app-wide account',
+    removeProfile: "Remove this profile's connection",
+    removeProfileTitle: "Remove this profile's connection?",
+    removeProfileBody: 'This profile will go back to using the app-wide account.',
+    removeProfileConfirm: 'Remove',
+    usingAppForProfile: 'Using the app-wide account for this profile',
     usingApp: 'Using credentials for all profiles',
     usingProfile: 'Using credentials for this profile',
     usingEnv: 'Using environment credentials',
@@ -352,7 +372,22 @@ const ES = {
     scopeApp: 'Todos los perfiles',
     scopeProfile: 'Este perfil',
     scopeHint: 'Se aplica al próximo Conectar y Desconectar. Las credenciales guardadas no se mueven.',
-    scopeLocked: 'Las variables de entorno (TRELLO_API_KEY y TRELLO_TOKEN) tienen prioridad, así que esta opción no tiene efecto mientras estén definidas.',
+    scopeLocked: 'TRELLO_API_KEY y TRELLO_TOKEN tienen prioridad sobre lo que se guarde aquí. Quítalas para configurar la conexión desde este panel.',
+    scopeWarnTitle: '¿Usar una sola cuenta para todos los perfiles?',
+    scopeWarn1: 'Las credenciales que guardes a partir de ahora se almacenan una sola vez para toda la app.',
+    scopeWarn2: 'Todos los perfiles sin conexión propia usarán esta cuenta.',
+    scopeWarn3: 'Los perfiles que ya tienen credenciales propias las conservan: desconéctalos explícitamente para que pasen a usar esta.',
+    scopeWarnConfirm: 'Usar para todos los perfiles',
+    changeAccount: 'Cambiar de cuenta',
+    changeIntroApp: 'La cuenta nueva se guarda para todos los perfiles.',
+    changeIntroProfile: 'La cuenta nueva se guarda solo para este perfil.',
+    connectScope: scope => (scope === 'profile' ? 'Conectar este perfil' : 'Conectar para todos los perfiles'),
+    overridesApp: 'Este perfil reemplaza la cuenta de toda la app',
+    removeProfile: 'Quitar la conexión de este perfil',
+    removeProfileTitle: '¿Quitar la conexión de este perfil?',
+    removeProfileBody: 'Este perfil volverá a usar la cuenta de toda la app.',
+    removeProfileConfirm: 'Quitar',
+    usingAppForProfile: 'Usando la cuenta de toda la app para este perfil',
     usingApp: 'Usando las credenciales de todos los perfiles',
     usingProfile: 'Usando las credenciales de este perfil',
     usingEnv: 'Usando las credenciales del entorno',
@@ -589,29 +624,47 @@ export function normalizeSettings(raw) {
     sendMode: r.sendMode === 'submit' ? 'submit' : 'insert',
     refreshSec: REFRESH_CHOICES.includes(refresh) ? refresh : DEFAULT_SETTINGS.refreshSec,
     defaultBoard: typeof r.defaultBoard === 'string' && r.defaultBoard ? r.defaultBoard : null,
-    // Where the next Connect / Disconnect acts: one account for the whole app, or for this profile only.
-    credentialScope: r.credentialScope === 'profile' ? 'profile' : 'app'
+    // Where the next Connect / Disconnect acts. A stored choice is kept as is; the default is this profile.
+    credentialScope: r.credentialScope === 'app' ? 'app' : 'profile'
   }
 }
 
 /**
  * What Settings shows about the stored credentials (`GET /credentials`) for the chosen scope.
- * `state` is the source in use; `locked` when environment variables decide (the scope then has no effect);
- * `reconnectFor` is the chosen scope when it holds nothing yet but the other one does.
+ *
+ * - `state`    the source in use: env, profile, app or none (unknown before the first answer)
+ * - `line`     which status sentence applies: env, profile, app, appForProfile or none
+ * - `locked`   environment variables decide: the scope has no effect and nothing can be changed here
+ * - `chosenStored`  the chosen scope already holds credentials
+ * - `overrides`     this profile's own file wins over an existing app-wide one
+ * - `reconnectFor`  the chosen scope when it holds nothing yet but the other one does
  */
 export function credentialsView(status, chosen = 'app') {
+  const none = { state: 'unknown', line: null, locked: false, connected: false, chosenStored: false, overrides: false, reconnectFor: null, profileIsRoot: false }
+
   if (!status || typeof status !== 'object') {
-    return { state: 'unknown', locked: false, reconnectFor: null, profileIsRoot: false }
+    return none
   }
 
   const state = status.source === 'env' || status.source === 'profile' || status.source === 'app' ? status.source : 'none'
   const profileIsRoot = Boolean(status.profile_is_root)
   const has = { app: Boolean(status.app_file), profile: Boolean(status.profile_file) }
   const other = chosen === 'profile' ? 'app' : 'profile'
+  // Without a home of its own, "this profile" and "all profiles" are the same file.
+  const chosenStored = profileIsRoot ? has.app : has[chosen]
+  let line = state
+
+  if (state === 'app' && chosen === 'profile' && !profileIsRoot) {
+    line = 'appForProfile'
+  }
 
   return {
     state,
+    line,
     locked: state === 'env',
+    connected: state === 'profile' || state === 'app',
+    chosenStored,
+    overrides: Boolean(status.profile_overrides) && has.app && !profileIsRoot,
     reconnectFor: state !== 'env' && !profileIsRoot && !has[chosen] && has[other] ? chosen : null,
     profileIsRoot
   }
@@ -1853,16 +1906,29 @@ function BoardPicker({ boards, boardId }) {
   )
 }
 
-function CredentialsSettings({ view }) {
+function CredentialsSettings({ view, onAction }) {
   const t = usePluginI18n(ID)
   const settings = useValue(RT.store.settings)
+  const chosen = settings.credentialScope
 
   const stateLine = {
     app: t('settings.usingApp'),
+    appForProfile: t('settings.usingAppForProfile'),
     profile: t('settings.usingProfile'),
     env: t('settings.usingEnv'),
     none: t('settings.usingNone')
-  }[view.state]
+  }[view.line]
+
+  const choose = id => {
+    if (id === 'app' && RT.store.settings.get().credentialScope !== 'app') {
+      // Moving to one shared account affects other profiles: ask first, persist only on confirm.
+      onAction('scope-app')
+
+      return
+    }
+
+    setSettings({ credentialScope: id })
+  }
 
   const control = h(
     'div',
@@ -1870,25 +1936,49 @@ function CredentialsSettings({ view }) {
     h(SegmentedControl, {
       className: view.locked ? 'pointer-events-none' : undefined,
       disabled: view.locked,
-      onChange: id => setSettings({ credentialScope: id }),
+      onChange: choose,
       options: [{ id: 'app', label: t('settings.scopeApp') }, { id: 'profile', label: t('settings.scopeProfile') }],
-      value: settings.credentialScope
+      value: chosen
     })
   )
+
+  const showRemove = view.overrides
+  const showDisconnect = view.connected && view.chosenStored && !(view.overrides && chosen === 'profile')
+  const actions = []
+
+  if (!view.locked) {
+    if (view.connected && view.chosenStored) {
+      actions.push(h(Button, { 'data-trello': 'cred-change', key: 'change', onClick: () => onAction('change'), size: 'sm', type: 'button', variant: 'outline' }, t('settings.changeAccount')))
+    } else if (view.connected) {
+      actions.push(h(Button, { 'data-trello': 'cred-connect', key: 'connect', onClick: () => onAction('connect'), size: 'sm', type: 'button', variant: 'outline' }, t('settings.connectScope', chosen)))
+    } else if (view.state === 'none') {
+      actions.push(h(Button, { 'data-trello': 'cred-connect', key: 'connect', onClick: () => onAction('connect'), size: 'sm', type: 'button' }, t('connect.connect')))
+    }
+
+    if (showDisconnect) {
+      actions.push(h(Button, { 'data-trello': 'disconnect', key: 'disconnect', onClick: () => onAction('disconnect'), size: 'sm', type: 'button', variant: 'destructive' }, t('settings.disconnect')))
+    }
+
+    if (showRemove) {
+      actions.push(h(Button, { 'data-trello': 'cred-remove-profile', key: 'remove', onClick: () => onAction('remove-profile'), size: 'sm', type: 'button', variant: chosen === 'profile' ? 'destructive' : 'outline' }, t('settings.removeProfile')))
+    }
+  }
 
   return h(
     'div',
     { 'data-trello': 'credentials', style: st(FILL, { gap: '0.25rem' }) },
     h('span', { style: SMALL }, t('settings.credentials')),
     h(Tip, { label: view.locked ? t('settings.scopeLocked') : undefined }, control),
-    stateLine && h('span', { 'data-trello': 'cred-state', 'data-trello-source': view.state, style: st(MUTED, SMALL) }, stateLine),
+    stateLine && h('span', { 'data-trello': 'cred-state', 'data-trello-source': view.state, 'data-trello-line': view.line, style: st(MUTED, SMALL) }, stateLine),
+    view.overrides && h('span', { 'data-trello': 'cred-overrides', style: st(MUTED, SMALL) }, t('settings.overridesApp')),
     view.reconnectFor && h('span', { 'data-trello': 'cred-reconnect', style: st(SMALL, { color: 'var(--ui-yellow)' }) }, t('settings.reconnectFor', view.reconnectFor)),
-    settings.credentialScope === 'profile' && view.profileIsRoot && h('span', { 'data-trello': 'cred-root-note', style: st(MUTED, SMALL) }, t('settings.profileIsRoot')),
-    h('span', { style: st(MUTED, SMALL) }, t('settings.scopeHint'))
+    chosen === 'profile' && view.profileIsRoot && h('span', { 'data-trello': 'cred-root-note', style: st(MUTED, SMALL) }, t('settings.profileIsRoot')),
+    h('span', { style: st(MUTED, SMALL) }, t('settings.scopeHint')),
+    actions.length > 0 && h('div', { 'data-trello': 'cred-actions', style: st(ROW, { flexWrap: 'wrap', gap: '0.375rem', marginTop: '0.25rem' }) }, ...actions)
   )
 }
 
-function SettingsPanel({ boards, member, onDisconnect }) {
+function SettingsPanel({ boards, member, onAction }) {
   const t = usePluginI18n(ID)
   const settings = useValue(RT.store.settings)
   const board = boards.find(b => b.id === settings.defaultBoard)
@@ -1915,23 +2005,45 @@ function SettingsPanel({ boards, member, onDisconnect }) {
       )
     ),
     h(Separator, null),
-    h(CredentialsSettings, { view: credentials }),
-    h(Button, { 'data-trello': 'disconnect', disabled: credentials.locked, onClick: onDisconnect, size: 'sm', type: 'button', variant: 'destructive' }, t('settings.disconnect'))
+    h(CredentialsSettings, { onAction, view: credentials })
   )
 }
 
-/** Confirm + perform Disconnect for the scope chosen in Settings (read at click time). */
-function DisconnectDialog({ open, onClose }) {
+/** Drop everything cached from the previous account, keep the connection check itself. */
+function forgetAccountData(qc) {
+  RT.store.openCard.set(null)
+  qc.resetQueries({ queryKey: K.boards })
+  qc.resetQueries({ queryKey: ['trello', 'view'] })
+  qc.resetQueries({ queryKey: ['trello', 'card'] })
+  qc.resetQueries({ queryKey: ['trello', 'chip'] })
+  qc.invalidateQueries({ queryKey: K.credentials })
+  qc.invalidateQueries({ queryKey: K.health })
+}
+
+/** Asked before "All profiles" is persisted: it changes what other profiles fall back to. */
+function ScopeWarningDialog({ open, onClose }) {
+  const t = usePluginI18n(ID)
+
+  return h(
+    ConfirmDialog,
+    { confirmLabel: t('settings.scopeWarnConfirm'), onClose, onConfirm: () => setSettings({ credentialScope: 'app' }), open, title: t('settings.scopeWarnTitle') },
+    h('ul', { 'data-trello': 'scope-warning', style: { margin: 0, paddingLeft: '1.125rem', listStyle: 'disc', fontSize: '0.75rem', lineHeight: '1.125rem' } }, ...['scopeWarn1', 'scopeWarn2', 'scopeWarn3'].map(key => h('li', { key }, t(`settings.${key}`))))
+  )
+}
+
+/** Confirm + perform a delete: the chosen scope ("disconnect") or this profile's own file ("remove-profile"). */
+function DisconnectDialog({ open, onClose, variant }) {
   const t = usePluginI18n(ID)
   const qc = useQueryClient()
   const scope = useValue(RT.store.settings).credentialScope
+  const removing = variant === 'remove-profile'
 
   const disconnect = async () => {
-    const chosen = RT.store.settings.get().credentialScope
+    const target = removing ? 'profile' : RT.store.settings.get().credentialScope
     const before = qc.getQueryData(K.credentials)
 
     try {
-      await rest(`/credentials?scope=${chosen}`, { method: 'DELETE' })
+      await rest(`/credentials?scope=${target}`, { method: 'DELETE' })
     } catch (err) {
       // A 204 has no body; only a real HTTP failure aborts the disconnect.
       if (parseApiError(err).status >= 400) {
@@ -1940,7 +2052,7 @@ function DisconnectDialog({ open, onClose }) {
     }
 
     // The other scope may still hold an account: this profile is then connected through it.
-    const remains = Boolean(before) && (chosen === 'profile' ? Boolean(before.app_file) && !before.profile_is_root : Boolean(before.profile_file))
+    const remains = Boolean(before) && (target === 'profile' ? Boolean(before.app_file) && !before.profile_is_root : Boolean(before.profile_file))
 
     RT.ctx.storage.remove('boardId')
     RT.store.boardId.set(null)
@@ -1954,13 +2066,51 @@ function DisconnectDialog({ open, onClose }) {
     toast('info', t('settings.disconnected'))
   }
 
-  return h(ConfirmDialog, { confirmLabel: t('settings.disconnect'), description: t(scope === 'profile' ? 'settings.disconnectBodyProfile' : 'settings.disconnectBodyApp'), destructive: true, onClose, onConfirm: disconnect, open, title: t('settings.disconnectTitle') })
+  const title = removing ? t('settings.removeProfileTitle') : t('settings.disconnectTitle')
+  const body = removing ? t('settings.removeProfileBody') : t(scope === 'profile' ? 'settings.disconnectBodyProfile' : 'settings.disconnectBodyApp')
+
+  return h(ConfirmDialog, { confirmLabel: removing ? t('settings.removeProfileConfirm') : t('settings.disconnect'), description: body, destructive: true, onClose, onConfirm: disconnect, open, title })
+}
+
+/** The same connection form as the empty state, in a dialog: connect, or change the account. */
+function ChangeAccountDialog({ open, onClose, changing }) {
+  const t = usePluginI18n(ID)
+  const scope = useValue(RT.store.settings).credentialScope
+
+  return h(
+    Dialog,
+    { onOpenChange: value => { if (!value) onClose() }, open },
+    h(
+      DialogContent,
+      { 'data-trello': 'change-dialog' },
+      h(DialogHeader, null, h(DialogTitle, null, changing ? t('settings.changeAccount') : t('connect.title')), h(DialogDescription, null, t(scope === 'profile' ? 'settings.changeIntroProfile' : 'settings.changeIntroApp'))),
+      h(ConnectForm, { onConnected: onClose })
+    )
+  )
+}
+
+/** Whichever credential dialog the header asked for. */
+function CredentialDialogs({ dialog, onClose }) {
+  return h(
+    'div',
+    { 'data-trello': 'credential-dialogs', style: { display: 'contents' } },
+    h(ScopeWarningDialog, { onClose, open: dialog === 'scope-app' }),
+    h(DisconnectDialog, { onClose, open: dialog === 'disconnect', variant: 'disconnect' }),
+    h(DisconnectDialog, { onClose, open: dialog === 'remove-profile', variant: 'remove-profile' }),
+    (dialog === 'change' || dialog === 'connect') && h(ChangeAccountDialog, { changing: dialog === 'change', onClose, open: true })
+  )
 }
 
 function Header({ boards, boardId, member, fetching, onRefresh }) {
   const t = usePluginI18n(ID)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [confirm, setConfirm] = useState(false)
+  const [dialog, setDialog] = useState(null)
+
+  // The settings popover closes first: the dialogs live here so they outlast it.
+  const onAction = kind => {
+    setSettingsOpen(false)
+    setDialog(kind)
+  }
 
   return h(
     'header',
@@ -1972,9 +2122,9 @@ function Header({ boards, boardId, member, fetching, onRefresh }) {
       Popover,
       { onOpenChange: setSettingsOpen, open: settingsOpen },
       h(PopoverTrigger, { asChild: true }, h(Button, { 'aria-label': t('common.settings'), 'data-trello': 'settings-button', size: 'icon-xs', type: 'button', variant: 'ghost' }, h(Codicon, { name: 'gear' }))),
-      h(PopoverContent, { align: 'end', style: { width: '18rem' } }, h(SettingsPanel, { boards, member, onDisconnect: () => { setSettingsOpen(false); setConfirm(true) } }))
+      h(PopoverContent, { align: 'end', style: { width: '18rem' } }, h(SettingsPanel, { boards, member, onAction }))
     ),
-    h(DisconnectDialog, { onClose: () => setConfirm(false), open: confirm })
+    h(CredentialDialogs, { dialog, onClose: () => setDialog(null) })
   )
 }
 
@@ -2261,7 +2411,11 @@ function Drawer({ cardId, view, actions }) {
 
 // -- connect form -----------------------------------------------------------
 
-function ConnectView({ rejected }) {
+/**
+ * API key + token form. Used by the empty state and by the "Change account" dialog; the scope it saves to is
+ * the one chosen in Settings, read when the user submits.
+ */
+function ConnectForm({ rejected = false, onConnected }) {
   const t = usePluginI18n(ID)
   const qc = useQueryClient()
   const [apiKey, setApiKey] = useState('')
@@ -2276,12 +2430,10 @@ function ConnectView({ rejected }) {
       setError('')
       toast('success', t('connect.connectedAs', res?.member?.username || ''))
 
-      // Nothing from a previous account may survive: drop every cached Trello payload
-      // (none is on screen while the connect form is up), then re-check the connection.
-      qc.removeQueries({ queryKey: K.boards })
-      qc.removeQueries({ queryKey: ['trello', 'view'] })
-      qc.removeQueries({ queryKey: ['trello', 'card'] })
-      qc.invalidateQueries({ queryKey: K.all })
+      // Nothing from a previous account may survive: reset every cached Trello payload (queries on screen
+      // refetch, the rest start clean), then re-check the connection.
+      forgetAccountData(qc)
+      onConnected && onConnected(res)
     },
     onError: err => {
       const parsed = parseApiError(err)
@@ -2299,8 +2451,7 @@ function ConnectView({ rejected }) {
 
   return h(
     'div',
-    { 'data-trello': 'connect', style: st(FILL, { gap: '0.625rem', padding: '1rem' }) },
-    h(EmptyState, { className: 'min-h-0', description: t('connect.intro'), title: t('connect.title') }),
+    { 'data-trello': 'connect-form', style: st(FILL, { gap: '0.625rem' }) },
     rejected && h('div', { 'data-trello': 'rejected', role: 'alert', style: st(SMALL, { color: 'var(--ui-red)' }) }, t('connect.rejected')),
     h('div', { style: st(MUTED, SMALL) }, t('connect.steps')),
     h(Button, { onClick: () => openLink(TRELLO_ADMIN_URL), size: 'xs', type: 'button', variant: 'text' }, h(Codicon, { name: 'link-external' }), t('connect.openAdmin')),
@@ -2308,6 +2459,17 @@ function ConnectView({ rejected }) {
     h(Input, { 'aria-label': t('connect.token'), 'data-trello': 'token', onChange: e => setToken(e.target.value), onKeyDown: e => { if (isSubmitEnter(e)) submit() }, placeholder: t('connect.token'), type: 'password', value: token }),
     error && h('div', { 'data-trello': 'connect-error', role: 'alert', style: st(SMALL, { color: 'var(--ui-red)' }) }, error),
     h('div', null, h(Button, { 'data-trello': 'connect-submit', disabled: !ready || connect.isPending, onClick: submit, type: 'button' }, connect.isPending ? t('connect.connecting') : t('connect.connect')))
+  )
+}
+
+function ConnectView({ rejected }) {
+  const t = usePluginI18n(ID)
+
+  return h(
+    'div',
+    { 'data-trello': 'connect', style: st(FILL, { gap: '0.625rem', padding: '1rem' }) },
+    h(EmptyState, { className: 'min-h-0', description: t('connect.intro'), title: t('connect.title') }),
+    h(ConnectForm, { rejected })
   )
 }
 

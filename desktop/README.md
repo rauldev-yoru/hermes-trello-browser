@@ -71,9 +71,27 @@ written. The insert-a-prompt behaviour stays as the fallback. See
 
 ## Settings (gear in the header)
 
-Send mode (insert / send), refresh interval (off, 15, 25 or 60 s), default board,
-and **Disconnect** (`DELETE /credentials`). Values live in `ctx.storage`; the last
-board is remembered there too.
+Send mode (insert / send), refresh interval (off, 15, 25 or 60 s), default board and the
+credentials section below. Values live in `ctx.storage`; the last board is remembered there too.
+
+### Credentials
+
+The **scope** selector decides where the next Connect / Change account / Disconnect acts:
+**This profile** (default) or **All profiles**. Switching it never moves or copies anything that
+is already stored. The status line always says which account this profile is really using.
+
+| State (from `GET /credentials`) | Shown | Actions |
+|---|---|---|
+| `source: "env"` | Using environment credentials; selector disabled with a tip | none (remove `TRELLO_API_KEY` / `TRELLO_TOKEN` to configure here) |
+| `source: "profile"` | Using credentials for this profile | Change account, Disconnect |
+| `source: "app"` | Using credentials for all profiles, or, with This profile chosen, "Using the app-wide account for this profile" | Change account + Disconnect for the chosen scope; if it holds nothing yet, Connect this profile |
+| a profile file overriding an app-wide one | also "This profile overrides the app-wide account" | Remove this profile's connection |
+| nothing stored | No credentials stored | Connect |
+
+Choosing **All profiles** first asks for confirmation (other profiles without their own connection
+will use that account; profiles that have their own keep it) and only persists the choice if you
+confirm. **Change account** and **Connect** open the same `ConnectForm` as the empty state in a dialog;
+it posts `{api_key, token, scope}` and, on success, resets everything cached from the previous account.
 
 ## Transcript directive
 
